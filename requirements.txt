@@ -1,0 +1,6 @@
+python-telegram-bot==21.5
+anthropic
+python-dotenv
+apscheduler==3.10.4
+httpx
+feedparser
