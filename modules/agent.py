@@ -10,6 +10,7 @@ from .utils import (
     ask_claude, ask_claude_with_history, ask_claude_with_search, ask_claude_news,
     is_owner, is_allowed,
     memory_set, memory_get, memory_all, memory_delete,
+    preference_all, get_preferences_prompt,
     history_add, history_get, history_clear, history_summary,
     auto_extract_memory,
     schedule_save, schedule_load_all, schedule_delete,
@@ -19,39 +20,45 @@ from .utils import (
     get_cached_news, set_cached_news,
     MODEL_FAST, MODEL_SMART,
 )
+from .skills_loader import load_skills, list_skills
 
 def build_owner_system_prompt(user_id: str, text: str) -> str:
     """Build a rich, context-aware system prompt for the owner."""
-    mem = memory_all()
     tasks = task_list()
     schedules = schedule_load_all()
     recent_history = history_summary(user_id)
     now = datetime.now().strftime("%A, %d %B %Y %H:%M")
-    
-    # Build context sections
-    mem_text = "\n".join(f"- {k}: {v}" for k, v in mem.items()) or "Nothing stored yet"
-    
+
+    # Build strict preferences section (preferences.json takes priority over memory.json)
+    all_prefs = {**memory_all(), **preference_all()}
+    if all_prefs:
+        pref_lines = ["CRITICAL PREFERENCES - MUST ALWAYS FOLLOW:"]
+        for key, value in all_prefs.items():
+            pref_lines.append(f"  - {key}: {value}")
+        pref_lines.append(
+            "  Never ignore these preferences. They apply to every single response."
+        )
+        prefs_text = "\n".join(pref_lines)
+    else:
+        prefs_text = "No preferences stored yet."
+
     pending_tasks = [t for t in tasks if not t.get("done")]
     tasks_text = "\n".join(f"- {t['text']}" for t in pending_tasks[:5]) or "No pending tasks"
-    
+
     sched_text = "\n".join(
         f"- {j['time']} ({j['frequency']}): {j['label'][:60]}"
         for j in list(schedules.values())[:5]
     ) or "No active schedules"
 
-    return f"""You are ABbot — a smart, friendly personal AI agent assistant.
+    skills_text = load_skills()
 
-PERSONALITY:
-- You are proactive, concise, and genuinely helpful
-- You remember context from previous conversations
-- You have a warm but professional tone
-- You anticipate needs and offer relevant suggestions
-- You are honest when you don't know something
+    return f"""You are ABbot - smart personal AI agent.
+
+{prefs_text}
+{skills_text}
 
 CURRENT CONTEXT:
-- Date/Time: {now}
-- Owner's stored preferences and facts:
-{mem_text}
+Date/Time: {now}
 
 PENDING TASKS:
 {tasks_text}
@@ -59,23 +66,15 @@ PENDING TASKS:
 ACTIVE SCHEDULES:
 {sched_text}
 
-RECENT CONVERSATION HISTORY:
+RECENT CONVERSATION:
 {recent_history}
 
-CAPABILITIES:
-- Schedule tasks (weather, news, crypto, reports) at specific times
-- Remember facts and preferences permanently
-- Manage to-do tasks
-- Answer questions using conversation history as context
-- Help with research, analysis, summaries
-- Help family members Isaac (Year 10) and Arik (Year 6) with studies
-
-IMPORTANT RULES:
-- Always use conversation history to maintain context
-- If user refers to something mentioned earlier, use history to understand
-- Automatically remember important facts mentioned in conversation
-- Be concise — no unnecessary padding or repetition
-- If scheduling, confirm exactly what will be sent and when
+RULES:
+- ALWAYS follow preferences listed above
+- Use conversation history for context
+- Be concise and helpful
+- Never ignore stored preferences
+- If preference says Traditional Chinese, ALWAYS use it
 - Never show raw JSON or system data to the user"""
 
 logger = logging.getLogger(__name__)
@@ -668,3 +667,18 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_chat.id): return
     await update.message.chat.send_action("typing")
     await run_scheduled_job(context.bot, "manual_report", "daily_report")
+
+async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_chat.id): return
+    skills = list_skills()
+    if not skills:
+        await update.message.reply_text(
+            "No skills loaded yet.\n\n"
+            "Add .md files to the skills/ folder to teach ABbot new behaviors!"
+        )
+        return
+    skill_list = "\n".join(f"• {s}" for s in skills)
+    await update.message.reply_text(
+        f"Loaded Skills ({len(skills)}):\n\n{skill_list}\n\n"
+        f"Add .md files to skills/ folder to add more."
+    )

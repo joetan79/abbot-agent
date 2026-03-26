@@ -78,11 +78,12 @@ def is_allowed(chat_id: int) -> bool:
 def is_owner(chat_id: int) -> bool:
     return chat_id == OWNER_CHAT_ID
 
-DATA_DIR      = Path("data")
-MEMORY_FILE   = DATA_DIR / "memory.json"
-SCHEDULE_FILE = DATA_DIR / "schedules.json"
-TASKS_FILE    = DATA_DIR / "tasks.json"
-CACHE_FILE    = DATA_DIR / "news_cache.json"
+DATA_DIR          = Path("data")
+MEMORY_FILE       = DATA_DIR / "memory.json"
+PREFERENCES_FILE  = DATA_DIR / "preferences.json"
+SCHEDULE_FILE     = DATA_DIR / "schedules.json"
+TASKS_FILE        = DATA_DIR / "tasks.json"
+CACHE_FILE        = DATA_DIR / "news_cache.json"
 DATA_DIR.mkdir(exist_ok=True)
 
 def _load(path: Path) -> dict:
@@ -110,6 +111,39 @@ def memory_delete(key: str):
     mem = _load(MEMORY_FILE)
     mem.pop(key, None)
     _save(MEMORY_FILE, mem)
+
+def preference_set(key: str, value: str):
+    """Store a long-term preference that persists and is always injected into prompts."""
+    prefs = _load(PREFERENCES_FILE)
+    prefs[key] = {"value": value, "updated": datetime.now().isoformat()}
+    _save(PREFERENCES_FILE, prefs)
+    memory_set(key, value)  # Also save to memory for backward compatibility
+    logger.info(f"Preference saved: {key} = {value}")
+
+def preference_get(key: str, default=None):
+    prefs = _load(PREFERENCES_FILE)
+    entry = prefs.get(key)
+    return entry["value"] if entry else default
+
+def preference_all() -> dict:
+    prefs = _load(PREFERENCES_FILE)
+    return {k: v["value"] for k, v in prefs.items()}
+
+def get_preferences_prompt() -> str:
+    """Build a preferences string from memory/preferences to inject into every system prompt."""
+    prefs = preference_all()
+    mem = memory_all()
+    # Merge both; preferences.json takes priority over memory.json
+    all_prefs = {**mem, **prefs}
+    if not all_prefs:
+        return ""
+    lines = ["CRITICAL PREFERENCES - ALWAYS FOLLOW THESE:"]
+    for key, value in all_prefs.items():
+        lines.append(f"  * {key}: {value}")
+    lines.append(
+        "These are permanent preferences. NEVER ignore them in any response."
+    )
+    return "\n".join(lines)
 
 def schedule_save(job_id: str, data: dict):
     jobs = _load(SCHEDULE_FILE)
@@ -268,20 +302,30 @@ def ask_claude_with_history(system: str, user_msg: str,
 
 def auto_extract_memory(user_id: str, text: str):
     """Automatically extract and save useful facts from conversation."""
-    system = """Extract any personal facts or preferences from this message that are worth remembering long term.
-Return ONLY valid JSON array of objects like:
-[{"key": "city", "value": "Kuala Lumpur"}, {"key": "job", "value": "engineer"}]
-If nothing worth remembering, return empty array: []
-Only extract clear, explicit facts. Do not guess or infer."""
+    system = """Extract personal facts or preferences from this message worth remembering long term.
+Return ONLY valid JSON array:
+[
+  {"key": "chinese_script", "value": "Traditional Chinese", "is_preference": true},
+  {"key": "city", "value": "Kuala Lumpur", "is_preference": false}
+]
+is_preference=true for strong preferences (language, format, style rules).
+is_preference=false for facts (city, name, job).
+If nothing to remember return: []
+Only extract clear explicit facts."""
     try:
-        raw = ask_claude(system, text, max_tokens=200, model=MODEL_FAST)
+        raw = ask_claude(system, text, max_tokens=300, model=MODEL_FAST)
         raw = raw.strip().strip("```json").strip("```").strip()
         import json
         facts = json.loads(raw)
         for fact in facts:
             if "key" in fact and "value" in fact:
                 memory_set(fact["key"], fact["value"])
-                logger.info(f"Auto-extracted memory: {fact['key']} = {fact['value']}")
+                if fact.get("is_preference"):
+                    preference_set(fact["key"], fact["value"])
+                logger.info(
+                    f"Auto-extracted: {fact['key']} = {fact['value']} "
+                    f"(pref: {fact.get('is_preference')})"
+                )
     except Exception:
         pass  # Silent fail — not critical
 
