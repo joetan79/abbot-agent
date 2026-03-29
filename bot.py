@@ -103,8 +103,8 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         full_context = text
 
     if is_private and is_owner(chat_id):
-        # Inject full context (including quoted message) into the update text
-        update.message._text = full_context
+        # Store quoted context for handler to use
+        context.user_data["full_context"] = full_context
         await handle_owner_message(update, context)
         return
 

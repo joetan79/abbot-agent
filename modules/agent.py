@@ -429,7 +429,9 @@ async def run_scheduled_job(bot, job_id: str, action: str):
         logger.error(f"Failed to send scheduled message: {e}")
 
 async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or ""
+    # Use full_context if available (includes quoted message)
+    text = context.user_data.pop("full_context", None) \
+           or update.message.text or ""
     intent_data = parse_intent(text)
     intent = intent_data.get("intent", "chat")
     logger.info(f"DEBUG intent: {intent} | data: {intent_data}")
