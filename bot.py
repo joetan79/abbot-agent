@@ -193,6 +193,17 @@ async def cmd_clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history_clear(user_id)
     await update.message.reply_text("Memory cleared! Fresh start. 🧹")
 
+async def cmd_newsstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_chat.id):
+        return
+    from modules.utils import get_published_count
+    count = get_published_count()
+    await update.message.reply_text(
+        f"News Stats:\n"
+        f"Total articles tracked: {count}\n"
+        f"(Articles already sent won't repeat)"
+    )
+
 async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     scheduler = AsyncIOScheduler()
@@ -213,7 +224,8 @@ async def main():
     app.add_handler(CommandHandler("skills",    cmd_skills))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, route_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
-    app.add_handler(CommandHandler("clear", cmd_clear_history))
+    app.add_handler(CommandHandler("clear",      cmd_clear_history))
+    app.add_handler(CommandHandler("newsstatus", cmd_newsstatus))
     await app.bot.set_my_commands([
         BotCommand("start",     "Welcome & help"),
         BotCommand("ask",       "Ask any question"),
@@ -226,7 +238,8 @@ async def main():
         BotCommand("news",      "Top AI & tech news"),
         BotCommand("report",    "Daily report now"),
         BotCommand("skills",    "View loaded AI skills"),
-        BotCommand("clear",     "Clear conversation history"),
+        BotCommand("clear",      "Clear conversation history"),
+        BotCommand("newsstatus", "News dedup tracking stats"),
     ])
     logger.info("🤖 AgentBot is running...")
     await app.run_polling(allowed_updates=Update.ALL_TYPES)

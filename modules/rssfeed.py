@@ -7,6 +7,7 @@ import feedparser
 import logging
 from datetime import datetime, timezone, timedelta
 from time import mktime
+from modules.utils import is_article_published, mark_article_published
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,7 @@ def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
     """
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     all_articles = []
+    all_articles_raw = []  # Unfiltered — used for force-fetch fallback
 
     for feed_info in AI_TECH_FEEDS:
         try:
@@ -148,14 +150,24 @@ def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
                 if not is_relevant(title, summary):
                     continue
 
-                all_articles.append({
+                article = {
                     "title": title,
                     "summary": summary,
                     "source_name": feed_info["name"],
                     "source_url": article_url,
                     "published_at": pub_str,
                     "pub_dt": pub_dt,
-                })
+                }
+                all_articles_raw.append(article)
+
+                # Skip if already sent before
+                if is_article_published(article_url):
+                    logger.info(
+                        f"Skipping duplicate: {title[:50]}"
+                    )
+                    continue
+
+                all_articles.append(article)
 
         except Exception as e:
             logger.error(f"RSS error {feed_info['name']}: {e}")
@@ -194,6 +206,12 @@ def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
                     title_lower = title.lower()[:50]
                     if title_lower in seen_titles:
                         continue
+                    # Skip if already sent before
+                    if is_article_published(article_url):
+                        logger.info(
+                            f"Skipping duplicate: {title[:50]}"
+                        )
+                        continue
                     seen_titles.append(title_lower)
                     summary = ""
                     if hasattr(entry, "summary"):
@@ -215,6 +233,22 @@ def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
                 continue
         unique_articles.sort(
             key=lambda x: x["pub_dt"], reverse=True)
+
+    # Step 7: if all articles were already published, force fetch without filter
+    if not unique_articles:
+        logger.warning(
+            "All available articles already published. "
+            "Fetching without duplicate filter..."
+        )
+        seen_raw = []
+        for article in all_articles_raw:
+            title_lower = article["title"].lower()[:50]
+            if title_lower not in seen_raw:
+                seen_raw.append(title_lower)
+                unique_articles.append(article)
+        if unique_articles:
+            unique_articles.sort(key=lambda x: x["pub_dt"], reverse=True)
+            logger.info("Force fetched articles to avoid empty report")
 
     result = unique_articles[:count]
     # Remove pub_dt before returning (internal use only)

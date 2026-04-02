@@ -9,7 +9,8 @@
       "Bash(venv/bin/pip install:*)",
       "Bash(pip show:*)",
       "Bash(ANTHROPIC_API_KEY=test OWNER_CHAT_ID=0 python3 -c \":*)",
-      "Bash(ANTHROPIC_API_KEY=test OWNER_CHAT_ID=0 python3 -m py_compile modules/utils.py)"
+      "Bash(ANTHROPIC_API_KEY=test OWNER_CHAT_ID=0 python3 -m py_compile modules/utils.py)",
+      "Bash(crontab:*)"
     ]
   }
 }

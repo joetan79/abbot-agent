@@ -83,7 +83,8 @@ MEMORY_FILE       = DATA_DIR / "memory.json"
 PREFERENCES_FILE  = DATA_DIR / "preferences.json"
 SCHEDULE_FILE     = DATA_DIR / "schedules.json"
 TASKS_FILE        = DATA_DIR / "tasks.json"
-CACHE_FILE        = DATA_DIR / "news_cache.json"
+CACHE_FILE              = DATA_DIR / "news_cache.json"
+PUBLISHED_ARTICLES_FILE = DATA_DIR / "published_articles.json"
 DATA_DIR.mkdir(exist_ok=True)
 
 def _load(path: Path) -> dict:
@@ -394,6 +395,51 @@ def set_cached_news(cache_key: str, content: str):
         "timestamp": datetime.now().isoformat()
     }
     _save(CACHE_FILE, cache)
+
+
+def is_article_published(url: str) -> bool:
+    """Check if article URL was already sent."""
+    if not url:
+        return False
+    published = _load(PUBLISHED_ARTICLES_FILE)
+    return url in published
+
+def mark_article_published(url: str, title: str):
+    """Mark article as published so it won't repeat."""
+    if not url:
+        return
+    published = _load(PUBLISHED_ARTICLES_FILE)
+    published[url] = {
+        "title": title[:100],
+        "published_at": datetime.now().isoformat()
+    }
+    # Keep only last 500 articles to prevent file growing too large
+    if len(published) > 500:
+        sorted_items = sorted(
+            published.items(),
+            key=lambda x: x[1].get("published_at", ""),
+            reverse=True
+        )
+        published = dict(sorted_items[:500])
+    _save(PUBLISHED_ARTICLES_FILE, published)
+
+def get_published_count() -> int:
+    """Get count of published articles."""
+    return len(_load(PUBLISHED_ARTICLES_FILE))
+
+def clear_old_published(days: int = 7):
+    """Clear articles older than X days."""
+    from datetime import timedelta
+    published = _load(PUBLISHED_ARTICLES_FILE)
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    cleaned = {
+        url: data for url, data in published.items()
+        if data.get("published_at", "") > cutoff
+    }
+    _save(PUBLISHED_ARTICLES_FILE, cleaned)
+    removed = len(published) - len(cleaned)
+    if removed > 0:
+        logger.info(f"Cleared {removed} old published articles")
 
 
 def ask_claude_news(system: str, user_msg: str, max_tokens: int = 1500) -> str:

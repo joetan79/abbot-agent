@@ -281,6 +281,17 @@ async def run_scheduled_job(bot, job_id: str, action: str):
             # Format for Telegram
             text = format_articles_for_telegram(news_articles, time_period)
 
+            # Mark articles as published to prevent duplicates
+            from modules.utils import mark_article_published
+            for article in news_articles:
+                mark_article_published(
+                    article.get("source_url", ""),
+                    article.get("title", "")
+                )
+            logger.info(
+                f"Marked {len(news_articles)} articles as published"
+            )
+
             # Use Claude to enhance summaries if needed
             system = (
                 "You are an AI news analyst. "
