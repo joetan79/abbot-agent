@@ -277,6 +277,13 @@ async def run_scheduled_job(bot, job_id: str, action: str):
         # Fetch fresh news from NewsAPI
         news_articles = fetch_ai_news(hours=hours, count=5)
 
+        for i, a in enumerate(news_articles, 1):
+            logger.info(
+                f"Final article {i}: "
+                f"{a.get('title','')[:40]} | "
+                f"url: {a.get('source_url', 'MISSING')}"
+            )
+
         if news_articles:
             # Format for Telegram
             text = format_articles_for_telegram(news_articles, time_period)

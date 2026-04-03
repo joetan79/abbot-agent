@@ -3,6 +3,7 @@ RSS Feed integration for real-time AI and tech news.
 Free, no API key, real-time updates.
 """
 
+import re
 import feedparser
 import logging
 from datetime import datetime, timezone, timedelta
@@ -100,6 +101,44 @@ def is_relevant(title: str, summary: str) -> bool:
     return any(kw in text for kw in AI_KEYWORDS)
 
 
+def parse_article(entry, feed_name: str) -> dict | None:
+    """Parse a feedparser entry into an article dict. Returns None if invalid."""
+    title = entry.get("title", "").strip()
+    if not title:
+        return None
+
+    # STRICT: require source URL — RSS uses "link", NewsAPI uses "url"
+    url = entry.get("link") or entry.get("url") or ""
+    if not url or not url.startswith("http"):
+        return None
+
+    # Get summary — RSS uses "summary" or "description"
+    summary = ""
+    if hasattr(entry, "summary"):
+        summary = entry.summary
+    elif hasattr(entry, "description"):
+        summary = entry.description
+    elif entry.get("summary"):
+        summary = entry.get("summary", "")
+    elif entry.get("description"):
+        summary = entry.get("description", "")
+
+    summary = re.sub(r"<[^>]+>", "", summary)
+    summary = re.sub(r"\s+", " ", summary).strip()
+    summary = summary[:500]
+
+    pub_dt = parse_date(entry)
+
+    return {
+        "title": title,
+        "summary": summary,
+        "source_name": feed_name,
+        "source_url": url,
+        "published_at": pub_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "pub_dt": pub_dt,
+    }
+
+
 def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
     """
     Fetch latest AI and tech news from RSS feeds.
@@ -115,55 +154,29 @@ def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
             feed = feedparser.parse(feed_info["url"])
 
             for entry in feed.entries:
-                # Get article URL
-                article_url = entry.get("link", "")
-                if not article_url:
+                article = parse_article(entry, feed_info["name"])
+                if not article:
                     continue
 
-                # Get title
-                title = entry.get("title", "").strip()
-                if not title:
-                    continue
-
-                # Get summary
-                summary = ""
-                if hasattr(entry, "summary"):
-                    summary = entry.summary
-                elif hasattr(entry, "description"):
-                    summary = entry.description
-
-                # Clean HTML from summary
-                import re
-                summary = re.sub(r"<[^>]+>", "", summary)
-                summary = re.sub(r"\s+", " ", summary).strip()
-                summary = summary[:500]
-
-                # Get published date
-                pub_dt = parse_date(entry)
-                pub_str = pub_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                logger.info(
+                    f"RSS article: {article['title'][:50]} | "
+                    f"url: {article.get('source_url', 'MISSING')}"
+                )
 
                 # Skip if older than requested hours
-                if pub_dt < cutoff:
+                if article["pub_dt"] < cutoff:
                     continue
 
                 # Check relevance for general feeds
-                if not is_relevant(title, summary):
+                if not is_relevant(article["title"], article["summary"]):
                     continue
 
-                article = {
-                    "title": title,
-                    "summary": summary,
-                    "source_name": feed_info["name"],
-                    "source_url": article_url,
-                    "published_at": pub_str,
-                    "pub_dt": pub_dt,
-                }
                 all_articles_raw.append(article)
 
                 # Skip if already sent before
-                if is_article_published(article_url):
+                if is_article_published(article["source_url"]):
                     logger.info(
-                        f"Skipping duplicate: {title[:50]}"
+                        f"Skipping duplicate: {article['title'][:50]}"
                     )
                     continue
 
@@ -196,39 +209,25 @@ def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
             try:
                 feed = feedparser.parse(feed_info["url"])
                 for entry in feed.entries[:5]:
-                    article_url = entry.get("link", "")
-                    title = entry.get("title", "").strip()
-                    if not article_url or not title:
+                    article = parse_article(entry, feed_info["name"])
+                    if not article:
                         continue
-                    pub_dt = parse_date(entry)
-                    if pub_dt < cutoff_relaxed:
+                    logger.info(
+                        f"RSS article: {article['title'][:50]} | "
+                        f"url: {article.get('source_url', 'MISSING')}"
+                    )
+                    if article["pub_dt"] < cutoff_relaxed:
                         continue
-                    title_lower = title.lower()[:50]
+                    title_lower = article["title"].lower()[:50]
                     if title_lower in seen_titles:
                         continue
-                    # Skip if already sent before
-                    if is_article_published(article_url):
+                    if is_article_published(article["source_url"]):
                         logger.info(
-                            f"Skipping duplicate: {title[:50]}"
+                            f"Skipping duplicate: {article['title'][:50]}"
                         )
                         continue
                     seen_titles.append(title_lower)
-                    summary = ""
-                    if hasattr(entry, "summary"):
-                        import re
-                        summary = re.sub(
-                            r"<[^>]+>", "", entry.summary)
-                        summary = re.sub(
-                            r"\s+", " ", summary).strip()[:500]
-                    unique_articles.append({
-                        "title": title,
-                        "summary": summary,
-                        "source_name": feed_info["name"],
-                        "source_url": article_url,
-                        "published_at": pub_dt.strftime(
-                            "%Y-%m-%dT%H:%M:%SZ"),
-                        "pub_dt": pub_dt,
-                    })
+                    unique_articles.append(article)
             except Exception:
                 continue
         unique_articles.sort(
@@ -237,15 +236,37 @@ def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
     # Step 7: if all articles were already published, force fetch without filter
     if not unique_articles:
         logger.warning(
-            "All available articles already published. "
-            "Fetching without duplicate filter..."
+            "All articles already published, "
+            "force fetching with URL priority"
         )
-        seen_raw = []
+        url_articles = []
+        no_url_articles = []
+
         for article in all_articles_raw:
+            if article.get("source_url"):
+                url_articles.append(article)
+            else:
+                no_url_articles.append(article)
+
+        # Prefer articles with URLs
+        force_pool = url_articles[:count]
+
+        # Only use no-URL articles if desperate
+        if len(force_pool) < count:
+            force_pool += no_url_articles[:count - len(force_pool)]
+
+        logger.info(
+            f"Force fetch: {len(url_articles)} with URL, "
+            f"{len(no_url_articles)} without URL"
+        )
+
+        seen_raw = []
+        for article in force_pool:
             title_lower = article["title"].lower()[:50]
             if title_lower not in seen_raw:
                 seen_raw.append(title_lower)
                 unique_articles.append(article)
+
         if unique_articles:
             unique_articles.sort(key=lambda x: x["pub_dt"], reverse=True)
             logger.info("Force fetched articles to avoid empty report")
@@ -320,6 +341,12 @@ def format_articles_for_telegram(
     lines = [f"AI & Tech News (past {time_period})\n"]
 
     for i, article in enumerate(articles, 1):
+        source_url = article.get("source_url", "")
+        if not source_url:
+            logger.warning(
+                f"Article {i} missing source URL: "
+                f"{article.get('title', '')[:50]}"
+            )
         # Format published time
         pub_time = ""
         if article.get("published_at"):
