@@ -35,22 +35,37 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return
     if is_owner(update.effective_chat.id):
         msg = (
-            "🤖 *AgentBot is online!*\n\n"
-            "*Study:* /ask /math /chinese /homework\n\n"
-            "*Agent:* /tasks /schedules /memory /news /report /skills\n\n"
-            "*💬 Just talk to me naturally!*\n"
-            "• _Schedule daily 7am weather_\n"
-            "• _Report AI top 5 news at 8am daily_\n"
-            "• _Add task: review project proposal_\n"
-            "• _Remember my city is Kuala Lumpur_\n"
+            "ABbot is online!\n\n"
+            "Agent Commands:\n"
+            "/tasks - View pending tasks\n"
+            "/schedules - View active schedules\n"
+            "/memory - View stored memory\n"
+            "/news - Latest AI & Tech news\n"
+            "/report - Daily report now\n"
+            "/skills - View loaded skills\n"
+            "/newsstatus - News tracking stats\n"
+            "/clear - Clear chat history\n\n"
+            "Just talk to me naturally!\n"
+            "Examples:\n"
+            "- Schedule daily 7am weather\n"
+            "- Add task: review proposal\n"
+            "- Remember my city is Kuala Lumpur\n"
+            "- What is BTC price now?\n"
+            "- Latest AI news\n\n"
+            "Study help (Isaac & Arik):\n"
+            "Just type any question directly!\n"
+            "Math, Chinese, Homework - just ask!"
         )
     else:
         msg = (
-            "👋 *Hi! I'm AgentBot!*\n\n"
-            "📚 /ask — any question\n"
-            "➕ /math — math solver\n"
-            "🀄 /chinese — Chinese translation\n"
-            "📝 /homework — homework help\n"
+            "Hi! I am ABbot!\n\n"
+            "Just type your question directly!\n\n"
+            "I can help with:\n"
+            "- Homework questions\n"
+            "- Math problems\n"
+            "- Chinese translation\n"
+            "- Any subject questions\n\n"
+            "No commands needed - just ask!"
         )
     await update.message.reply_text(msg, parse_mode=None)
 
@@ -228,18 +243,14 @@ async def main():
     app.add_handler(CommandHandler("newsstatus", cmd_newsstatus))
     await app.bot.set_my_commands([
         BotCommand("start",     "Welcome & help"),
-        BotCommand("ask",       "Ask any question"),
-        BotCommand("math",      "Step-by-step math"),
-        BotCommand("chinese",   "Chinese translation"),
-        BotCommand("homework",  "Homework help"),
         BotCommand("tasks",     "View pending tasks"),
         BotCommand("schedules", "View active schedules"),
         BotCommand("memory",    "View bot memory"),
-        BotCommand("news",      "Top AI & tech news"),
+        BotCommand("news",      "Top AI & Tech news"),
         BotCommand("report",    "Daily report now"),
         BotCommand("skills",    "View loaded AI skills"),
-        BotCommand("clear",      "Clear conversation history"),
-        BotCommand("newsstatus", "News dedup tracking stats"),
+        BotCommand("newsstatus","News tracking stats"),
+        BotCommand("clear",     "Clear conversation history"),
     ])
     logger.info("🤖 AgentBot is running...")
     await app.run_polling(allowed_updates=Update.ALL_TYPES)
