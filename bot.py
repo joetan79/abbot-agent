@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AgentBot — Personal AI Agent + Family Study Assistant"""
+"""AgentBot — ABbot Professional AI Agent"""
 
 import os, logging, asyncio
 from dotenv import load_dotenv
@@ -35,37 +35,33 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return
     if is_owner(update.effective_chat.id):
         msg = (
-            "ABbot is online!\n\n"
-            "Agent Commands:\n"
-            "/tasks - View pending tasks\n"
-            "/schedules - View active schedules\n"
-            "/memory - View stored memory\n"
+            "ABbot - Professional AI Agent\n\n"
+            "Commands:\n"
+            "/tasks - Pending tasks\n"
+            "/schedules - Active schedules\n"
+            "/memory - Stored memory\n"
             "/news - Latest AI & Tech news\n"
-            "/report - Daily report now\n"
-            "/skills - View loaded skills\n"
+            "/report - Daily report\n"
+            "/skills - Loaded skills\n"
             "/newsstatus - News tracking stats\n"
             "/clear - Clear chat history\n\n"
-            "Just talk to me naturally!\n"
-            "Examples:\n"
-            "- Schedule daily 7am weather\n"
-            "- Add task: review proposal\n"
-            "- Remember my city is Kuala Lumpur\n"
+            "Just talk naturally:\n"
+            "- Schedule daily 7am weather in KL\n"
+            "- Add task: review quarterly report\n"
             "- What is BTC price now?\n"
-            "- Latest AI news\n\n"
-            "Study help (Isaac & Arik):\n"
-            "Just type any question directly!\n"
-            "Math, Chinese, Homework - just ask!"
+            "- Translate this to Traditional Chinese\n"
+            "- Latest AI news last 8 hours"
         )
     else:
         msg = (
-            "Hi! I am ABbot!\n\n"
-            "Just type your question directly!\n\n"
+            "ABbot AI Assistant\n\n"
+            "How can I help you today?\n\n"
             "I can help with:\n"
-            "- Homework questions\n"
-            "- Math problems\n"
-            "- Chinese translation\n"
-            "- Any subject questions\n\n"
-            "No commands needed - just ask!"
+            "- Questions and research\n"
+            "- Math and calculations\n"
+            "- Language translation\n"
+            "- Analysis and explanations\n\n"
+            "Just type your question!"
         )
     await update.message.reply_text(msg, parse_mode=None)
 
@@ -125,11 +121,8 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     username = update.effective_user.username or ""
     user_id = str(update.effective_user.id)
-    profile = USER_PROFILES.get(username.lower())
-    ctx = (
-        f"You are helping {profile['name']}, a Year {profile['year']} student."
-        if profile else "You are a helpful assistant."
-    )
+    from modules.study import _get_user_context
+    ctx = _get_user_context(username)
     prefs = get_preferences_prompt()
     system = (
         f"{ctx}\n{prefs}\n"

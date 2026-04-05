@@ -1,11 +1,11 @@
-# ABbot - Personal AI Agent
+# ABbot - Professional AI Agent
 
-Telegram AI agent for personal productivity and family assistance.
+Telegram AI agent for productivity, research, and assistance.
 
 ## Features
-- Personal AI agent with memory and scheduling
-- Family study assistant (homework, math, chinese)
-- Real-time AI & Tech news via RSS feeds
+- AI agent with memory and scheduling
+- Study assistant (homework, math, Chinese)
+- Real-time AI & Tech news
 - Task management and daily reports
 - Auto-publishes news to AI & Tech Daily website
 
@@ -22,5 +22,4 @@ Telegram AI agent for personal productivity and family assistance.
 - Python 3.12
 - python-telegram-bot 21.5
 - APScheduler
-- feedparser (RSS)
-- FastAPI (web integration)
+- Web integration support

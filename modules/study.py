@@ -1,18 +1,29 @@
-"""Study handlers for Isaac (Year 10) and Arik (Year 6)."""
+"""Study handlers for student users."""
 
 from telegram import Update
 from telegram.ext import ContextTypes
 from .utils import ask_claude, ask_claude_with_search, is_allowed, MODEL_SMART, get_preferences_prompt
 
 USER_PROFILES = {
-    "IT1019":  {"year": 10, "name": "Isaac"},
-    "arik_username":  {"year": 6,  "name": "Arik"},
+    # Add Telegram usernames here
+    # Format: "username": {"role": "student",
+    #                      "level": "secondary"}
 }
 
-def _year_ctx(username: str) -> str:
-    p = USER_PROFILES.get((username or "").lower())
-    return f"You are helping {p['name']}, a Year {p['year']} student." if p else \
-           "You are helping a student."
+def _get_user_context(username: str) -> str:
+    profile = USER_PROFILES.get(
+        (username or "").lower())
+    if profile:
+        role = profile.get("role", "user")
+        level = profile.get("level", "")
+        if role == "student" and level:
+            return (
+                f"You are helping a {level} "
+                "level student. Explain clearly "
+                "at appropriate level."
+            )
+        return f"You are helping a {role}."
+    return "You are a professional AI assistant."
 
 async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return
@@ -22,7 +33,7 @@ async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     prefs = get_preferences_prompt()
     sys = (
-        f"{_year_ctx(update.effective_user.username)} "
+        f"{_get_user_context(update.effective_user.username)} "
         f"{prefs}\n\n"
         "You are a helpful study assistant. Search the web if needed "
         "for accurate, current information to answer the question clearly."
@@ -38,7 +49,7 @@ async def cmd_math(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     prefs = get_preferences_prompt()
     sys = (
-        f"{_year_ctx(update.effective_user.username)} "
+        f"{_get_user_context(update.effective_user.username)} "
         f"{prefs}\n\n"
         "You are a math tutor. "
         "Solve step by step with clear explanation. End with the final answer."
@@ -55,7 +66,7 @@ async def cmd_chinese(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     prefs = get_preferences_prompt()
     sys = (
-        f"{_year_ctx(update.effective_user.username)} "
+        f"{_get_user_context(update.effective_user.username)} "
         f"{prefs}\n\n"
         "You are a Chinese language tutor. "
         "CRITICAL: If user preference says Traditional Chinese, "
@@ -75,7 +86,7 @@ async def cmd_homework(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     prefs = get_preferences_prompt()
     sys = (
-        f"{_year_ctx(update.effective_user.username)} "
+        f"{_get_user_context(update.effective_user.username)} "
         f"{prefs}\n\n"
         "Homework tutor. "
         "Guide understanding, don't just give answers. End with a short summary they can use."
