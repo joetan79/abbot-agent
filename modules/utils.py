@@ -408,19 +408,23 @@ def mark_article_published(url: str, title: str):
     """Mark article as published so it won't repeat."""
     if not url:
         return
+    from datetime import timedelta
     published = _load(PUBLISHED_ARTICLES_FILE)
     published[url] = {
         "title": title[:100],
         "published_at": datetime.now().isoformat()
     }
-    # Keep only last 500 articles to prevent file growing too large
-    if len(published) > 500:
-        sorted_items = sorted(
-            published.items(),
-            key=lambda x: x[1].get("published_at", ""),
-            reverse=True
-        )
-        published = dict(sorted_items[:500])
+    # Auto-clean if too large — keep 7-day window
+    if len(published) > 1000:
+        cutoff = (
+            datetime.now() - timedelta(days=7)
+        ).isoformat()
+        published = {
+            u: data
+            for u, data in published.items()
+            if data.get("published_at", "") > cutoff
+        }
+        logger.info("Auto-cleaned published articles")
     _save(PUBLISHED_ARTICLES_FILE, published)
 
 def get_published_count() -> int:

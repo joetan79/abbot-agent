@@ -201,6 +201,32 @@ async def cmd_clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history_clear(user_id)
     await update.message.reply_text("Memory cleared! Fresh start. 🧹")
 
+async def cmd_feedhealth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_chat.id):
+        return
+    await update.message.chat.send_action("typing")
+    from modules.rssfeed import check_feed_health
+    health = check_feed_health()
+    ok = sum(1 for v in health.values() if v["status"] == "ok")
+    empty = sum(1 for v in health.values() if v["status"] == "empty")
+    error = sum(1 for v in health.values() if v["status"] == "error")
+    lines = [
+        "RSS Feed Health",
+        f"OK: {ok} | Empty: {empty} | Error: {error}",
+        "",
+    ]
+    for name, result in health.items():
+        status = result["status"]
+        icon = "✅" if status == "ok" else "⚠️" if status == "empty" else "❌"
+        entries = result.get("entries", 0)
+        lines.append(
+            f"{icon} {name}: {entries} entries"
+            if status == "ok" else
+            f"{icon} {name}: {status}"
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_newsstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_chat.id):
         return
@@ -234,6 +260,7 @@ async def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     app.add_handler(CommandHandler("clear",      cmd_clear_history))
     app.add_handler(CommandHandler("newsstatus", cmd_newsstatus))
+    app.add_handler(CommandHandler("feedhealth", cmd_feedhealth))
     await app.bot.set_my_commands([
         BotCommand("start",     "Welcome & help"),
         BotCommand("tasks",     "View pending tasks"),
@@ -243,6 +270,7 @@ async def main():
         BotCommand("report",    "Daily report now"),
         BotCommand("skills",    "View loaded AI skills"),
         BotCommand("newsstatus","News tracking stats"),
+        BotCommand("feedhealth","Check RSS feed health"),
         BotCommand("clear",     "Clear conversation history"),
     ])
     logger.info("🤖 AgentBot is running...")

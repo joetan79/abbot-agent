@@ -14,37 +14,91 @@ logger = logging.getLogger(__name__)
 
 # Top AI and Tech RSS feeds
 AI_TECH_FEEDS = [
+    # Original feeds
     {
         "name": "TechCrunch AI",
         "url": "https://techcrunch.com/category/artificial-intelligence/feed/",
+        "category": "AI & Tech",
+        "priority": 1,
     },
     {
         "name": "The Verge AI",
         "url": "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
+        "category": "AI & Tech",
+        "priority": 1,
     },
     {
         "name": "VentureBeat AI",
         "url": "https://venturebeat.com/category/ai/feed/",
+        "category": "AI & Tech",
+        "priority": 1,
     },
     {
         "name": "Ars Technica",
         "url": "https://feeds.arstechnica.com/arstechnica/index",
-    },
-    {
-        "name": "Wired AI",
-        "url": "https://www.wired.com/feed/tag/artificial-intelligence/rss",
+        "category": "AI & Tech",
+        "priority": 2,
     },
     {
         "name": "MIT Tech Review",
         "url": "https://www.technologyreview.com/feed/",
-    },
-    {
-        "name": "Reuters Tech",
-        "url": "https://feeds.reuters.com/reuters/technologyNews",
+        "category": "AI Research",
+        "priority": 1,
     },
     {
         "name": "ZDNet AI",
         "url": "https://www.zdnet.com/topic/artificial-intelligence/rss.xml",
+        "category": "AI & Tech",
+        "priority": 2,
+    },
+    # New high quality feeds
+    {
+        "name": "Google AI Blog",
+        "url": "https://blog.research.google/feeds/posts/default",
+        "category": "AI Research",
+        "priority": 1,
+    },
+    {
+        "name": "OpenAI News",
+        "url": "https://openai.com/news/rss.xml",
+        "category": "AI Models",
+        "priority": 1,
+    },
+    {
+        "name": "Hugging Face Blog",
+        "url": "https://huggingface.co/blog/feed.xml",
+        "category": "AI Research",
+        "priority": 1,
+    },
+    {
+        "name": "Bloomberg Tech",
+        "url": "https://feeds.bloomberg.com/technology/news.rss",
+        "category": "AI Business",
+        "priority": 2,
+    },
+    {
+        "name": "Synced AI",
+        "url": "https://syncedreview.com/feed/",
+        "category": "AI Research",
+        "priority": 2,
+    },
+    {
+        "name": "AI News",
+        "url": "https://www.artificialintelligence-news.com/feed/",
+        "category": "AI & Tech",
+        "priority": 1,
+    },
+    {
+        "name": "Towards Data Science",
+        "url": "https://towardsdatascience.com/feed",
+        "category": "AI Research",
+        "priority": 3,
+    },
+    {
+        "name": "InfoQ AI",
+        "url": "https://feed.infoq.com/",
+        "category": "AI & Tech",
+        "priority": 2,
     },
 ]
 
@@ -64,7 +118,7 @@ CRYPTO_FEEDS = [
     },
 ]
 
-# Keywords to filter AI/tech relevant articles
+# Keywords to filter AI/tech relevant articles (legacy — kept for compatibility)
 AI_KEYWORDS = [
     "artificial intelligence", "ai ", " ai",
     "machine learning", "deep learning",
@@ -75,6 +129,173 @@ AI_KEYWORDS = [
     "robot", "automation", "tech", "software",
     "apple", "meta ai", "samsung ai",
 ]
+
+
+def calculate_relevance_score(title: str, summary: str) -> int:
+    """
+    Score article relevance 0-100.
+    Higher = more relevant to AI & Tech.
+    """
+    text = (title + " " + summary).lower()
+    score = 0
+
+    # Tier 1 - Core AI topics (high value)
+    tier1_keywords = [
+        "artificial intelligence", "machine learning",
+        "large language model", "llm", "neural network",
+        "deep learning", "generative ai", "gen ai",
+        "foundation model", "transformer",
+    ]
+    for kw in tier1_keywords:
+        if kw in text:
+            score += 15
+
+    # Tier 2 - AI companies & products (high value)
+    tier2_keywords = [
+        "openai", "anthropic", "claude", "chatgpt",
+        "gpt-4", "gpt-5", "gemini", "copilot",
+        "nvidia", "deepmind", "meta ai", "llama",
+        "mistral", "groq", "perplexity", "midjourney",
+        "stable diffusion", "dall-e", "sora",
+    ]
+    for kw in tier2_keywords:
+        if kw in text:
+            score += 12
+
+    # Tier 3 - Tech topics (medium value)
+    tier3_keywords = [
+        "robotics", "automation", "autonomous",
+        "computer vision", "natural language",
+        "reinforcement learning", "ai agent",
+        "multimodal", "benchmark", "dataset",
+        "open source", "microsoft", "google",
+        "apple", "amazon", "tesla ai",
+    ]
+    for kw in tier3_keywords:
+        if kw in text:
+            score += 8
+
+    # Tier 4 - General tech (lower value)
+    tier4_keywords = [
+        "startup", "funding", "venture", "billion",
+        "launch", "release", "update", "version",
+        "software", "cloud", "data", "algorithm",
+        "chip", "semiconductor", "quantum",
+    ]
+    for kw in tier4_keywords:
+        if kw in text:
+            score += 4
+
+    # Boost for title matches (more important)
+    title_lower = title.lower()
+    for kw in tier1_keywords + tier2_keywords:
+        if kw in title_lower:
+            score += 10  # title bonus
+
+    # Penalty for non-tech content
+    penalty_keywords = [
+        "sports", "football", "celebrity",
+        "fashion", "cooking", "travel",
+        "weather forecast", "horoscope",
+    ]
+    for kw in penalty_keywords:
+        if kw in text:
+            score -= 20
+
+    return max(0, min(100, score))
+
+
+def is_relevant(title: str, summary: str, min_score: int = 8) -> bool:
+    """Check if article meets minimum relevance."""
+    score = calculate_relevance_score(title, summary)
+    return score >= min_score
+
+
+def auto_categorize(title: str, summary: str) -> str:
+    """Auto-assign category based on content."""
+    text = (title + " " + summary).lower()
+
+    # Check categories in priority order
+    if any(kw in text for kw in [
+        "gpt", "claude", "gemini", "llama",
+        "model release", "new model", "llm release",
+        "foundation model", "language model"
+    ]):
+        return "AI Models"
+
+    if any(kw in text for kw in [
+        "funding", "raises", "billion", "million",
+        "acquisition", "merger", "ipo", "valuation",
+        "investment", "startup", "venture"
+    ]):
+        return "AI Business"
+
+    if any(kw in text for kw in [
+        "regulation", "policy", "law", "ban",
+        "congress", "european", "gdpr", "act",
+        "government", "senate", "safety"
+    ]):
+        return "AI Policy"
+
+    if any(kw in text for kw in [
+        "research", "paper", "study", "benchmark",
+        "arxiv", "university", "lab", "experiment",
+        "breakthrough", "discovery", "published"
+    ]):
+        return "AI Research"
+
+    if any(kw in text for kw in [
+        "robot", "autonomous", "self-driving",
+        "drone", "automation", "manufacturing"
+    ]):
+        return "Robotics"
+
+    if any(kw in text for kw in [
+        "nvidia", "chip", "gpu", "hardware",
+        "semiconductor", "processor", "compute"
+    ]):
+        return "AI Hardware"
+
+    return "AI & Tech"  # default
+
+
+def meets_quality_standards(article: dict) -> bool:
+    """
+    Check article meets minimum quality bar.
+    Returns True if article should be included.
+    """
+    title = article.get("title", "")
+    summary = article.get("summary", "")
+
+    # Title must be meaningful length
+    if len(title) < 20:
+        logger.debug(f"Too short title: {title}")
+        return False
+
+    # Summary must have substance
+    if len(summary) < 50:
+        logger.debug(f"Too short summary: {title[:40]}")
+        return False
+
+    # Skip pure listicles/clickbait
+    clickbait_patterns = [
+        "you won't believe",
+        "this one trick",
+        "doctors hate",
+        "click here",
+    ]
+    title_lower = title.lower()
+    for pattern in clickbait_patterns:
+        if pattern in title_lower:
+            return False
+
+    # Must have minimum relevance
+    score = calculate_relevance_score(title, summary)
+    if score < 5:
+        logger.debug(f"Low relevance ({score}): {title[:40]}")
+        return False
+
+    return True
 
 
 def parse_date(entry) -> datetime:
@@ -93,12 +314,6 @@ def parse_date(entry) -> datetime:
     except Exception:
         pass
     return datetime.now(timezone.utc)
-
-
-def is_relevant(title: str, summary: str) -> bool:
-    """Check if article is AI/tech relevant."""
-    text = (title + " " + summary).lower()
-    return any(kw in text for kw in AI_KEYWORDS)
 
 
 def parse_article(item) -> dict | None:
@@ -187,6 +402,7 @@ def parse_article(item) -> dict | None:
         "source_url": source_url,
         "published_at": pub_str,
         "pub_dt": pub_dt,
+        "category": auto_categorize(title, summary),
     }
 
     logger.debug(
@@ -224,6 +440,10 @@ def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
                 if not article:
                     continue
 
+                # Quality filter
+                if not meets_quality_standards(article):
+                    continue
+
                 # Add feed name if no source
                 if not article["source_name"]:
                     article["source_name"] = feed_info["name"]
@@ -252,6 +472,28 @@ def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
             unique_articles.append(article)
 
     logger.info(f"After dedup: {len(unique_articles)} articles")
+
+    # Add relevance scores
+    for article in unique_articles:
+        article["relevance_score"] = calculate_relevance_score(
+            article["title"],
+            article["summary"]
+        )
+
+    # Sort by relevance score first, then date
+    unique_articles.sort(
+        key=lambda x: (
+            x.get("relevance_score", 0),
+            x.get("pub_dt", datetime.now(timezone.utc))
+        ),
+        reverse=True
+    )
+
+    if unique_articles:
+        logger.info(
+            f"Top article score: "
+            f"{unique_articles[0].get('relevance_score', 0)}"
+        )
 
     # STRATEGY: Try multiple filters in order
     # Always prefer articles WITH source URLs
@@ -356,6 +598,25 @@ def _clean_pub_dt(articles: list):
         a.pop("pub_dt", None)
 
 
+def check_feed_health() -> dict:
+    """Check which RSS feeds are responding."""
+    results = {}
+    for feed_info in AI_TECH_FEEDS:
+        try:
+            feed = feedparser.parse(feed_info["url"])
+            count = len(feed.entries)
+            results[feed_info["name"]] = {
+                "status": "ok" if count > 0 else "empty",
+                "entries": count,
+            }
+        except Exception as e:
+            results[feed_info["name"]] = {
+                "status": "error",
+                "error": str(e),
+            }
+    return results
+
+
 def fetch_crypto_news(count: int = 3) -> list:
     """Fetch latest crypto news from RSS feeds."""
     all_articles = []
@@ -402,13 +663,35 @@ def fetch_crypto_news(count: int = 3) -> list:
 
 
 def format_articles_for_telegram(
-        articles: list, time_period: str) -> str:
+        articles: list,
+        time_period: str) -> str:
     """Format RSS articles for Telegram message."""
     if not articles:
-        return f"No AI & Tech news found for last {time_period}."
+        return (
+            f"No AI & Tech news found "
+            f"for last {time_period}."
+        )
 
     now = datetime.now().strftime("%d %b %Y %H:%M")
-    lines = [f"AI & Tech News (past {time_period})\n"]
+
+    # Count categories
+    categories = {}
+    for a in articles:
+        cat = a.get("category", "AI & Tech")
+        categories[cat] = categories.get(cat, 0) + 1
+
+    cat_summary = " | ".join(
+        f"{cat}: {count}"
+        for cat, count in categories.items()
+    )
+
+    lines = [
+        f"AI & Tech News — {now}",
+        f"Period: past {time_period}",
+        f"Topics: {cat_summary}",
+        "─" * 30,
+        "",
+    ]
 
     for i, article in enumerate(articles, 1):
         pub_time = ""
@@ -418,7 +701,7 @@ def format_articles_for_telegram(
                     article["published_at"],
                     "%Y-%m-%dT%H:%M:%SZ"
                 ).replace(tzinfo=timezone.utc)
-                pub_time = dt.strftime("%b %d, %H:%M UTC")
+                pub_time = dt.strftime("%b %d, %H:%M")
             except Exception:
                 pub_time = ""
 
@@ -426,20 +709,41 @@ def format_articles_for_telegram(
         source_url = article.get("source_url", "")
         title = article.get("title", "")
         summary = article.get("summary", "")
+        category = article.get("category", "AI & Tech")
 
         block = f"{i}. {title}\n"
-        if summary:
-            block += f"{summary}\n"
+        block += f"[{category}]"
         if pub_time:
-            block += f"Published: {pub_time}\n"
+            block += f" • {pub_time}"
         if source_name:
-            block += f"Source: {source_name}\n"
+            block += f" • {source_name}"
+        block += "\n"
+        if summary:
+            short_summary = summary[:200]
+            if len(summary) > 200:
+                short_summary += "..."
+            block += f"{short_summary}\n"
+
+        # NEVER skip this - source link is critical
         if source_url:
             block += f"Link: {source_url}\n"
         else:
-            logger.warning(f"Article {i} has no URL: {title[:40]}")
+            logger.warning(
+                f"MISSING URL for article {i}: "
+                f"{title[:50]}"
+            )
 
         lines.append(block)
 
-    lines.append(f"\nUpdated: {now}")
+    # Summary stats
+    with_url = sum(
+        1 for a in articles
+        if a.get("source_url")
+    )
+    lines.append(
+        "─" * 30 + "\n"
+        f"{len(articles)} stories | "
+        f"{with_url} with source links"
+    )
+
     return "\n".join(lines)
