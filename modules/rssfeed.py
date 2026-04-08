@@ -13,9 +13,8 @@ from modules.utils import is_article_published, mark_article_published
 
 logger = logging.getLogger(__name__)
 
-# Top AI and Tech RSS feeds
+# High-frequency primary feeds — post daily, used in all tiers
 AI_TECH_FEEDS = [
-    # Original feeds
     {
         "name": "TechCrunch AI",
         "url": "https://techcrunch.com/category/artificial-intelligence/feed/",
@@ -41,9 +40,9 @@ AI_TECH_FEEDS = [
         "priority": 2,
     },
     {
-        "name": "MIT Tech Review",
-        "url": "https://www.technologyreview.com/feed/",
-        "category": "AI Research",
+        "name": "Reuters Tech",
+        "url": "https://feeds.reuters.com/reuters/technologyNews",
+        "category": "AI & Tech",
         "priority": 1,
     },
     {
@@ -52,7 +51,28 @@ AI_TECH_FEEDS = [
         "category": "AI & Tech",
         "priority": 2,
     },
-    # New high quality feeds
+    {
+        "name": "Bloomberg Tech",
+        "url": "https://feeds.bloomberg.com/technology/news.rss",
+        "category": "AI Business",
+        "priority": 2,
+    },
+    {
+        "name": "AI News",
+        "url": "https://www.artificialintelligence-news.com/feed/",
+        "category": "AI & Tech",
+        "priority": 1,
+    },
+    {
+        "name": "InfoQ AI",
+        "url": "https://feed.infoq.com/",
+        "category": "AI & Tech",
+        "priority": 2,
+    },
+]
+
+# Low-frequency research feeds — post infrequently, used ONLY in Tier 3 (72hr window)
+RESEARCH_FEEDS = [
     {
         "name": "Google AI Blog",
         "url": "https://blog.research.google/feeds/posts/default",
@@ -72,22 +92,16 @@ AI_TECH_FEEDS = [
         "priority": 1,
     },
     {
-        "name": "Bloomberg Tech",
-        "url": "https://feeds.bloomberg.com/technology/news.rss",
-        "category": "AI Business",
-        "priority": 2,
+        "name": "MIT Tech Review",
+        "url": "https://www.technologyreview.com/feed/",
+        "category": "AI Research",
+        "priority": 1,
     },
     {
-        "name": "Synced AI",
-        "url": "https://syncedreview.com/feed/",
+        "name": "The Batch",
+        "url": "https://www.deeplearning.ai/the-batch/feed/",
         "category": "AI Research",
         "priority": 2,
-    },
-    {
-        "name": "AI News",
-        "url": "https://www.artificialintelligence-news.com/feed/",
-        "category": "AI & Tech",
-        "priority": 1,
     },
     {
         "name": "Towards Data Science",
@@ -96,9 +110,9 @@ AI_TECH_FEEDS = [
         "priority": 3,
     },
     {
-        "name": "InfoQ AI",
-        "url": "https://feed.infoq.com/",
-        "category": "AI & Tech",
+        "name": "Synced AI",
+        "url": "https://syncedreview.com/feed/",
+        "category": "AI Research",
         "priority": 2,
     },
 ]
@@ -386,7 +400,9 @@ def parse_date(entry) -> datetime | None:
     return None  # NEVER return datetime.now()
 
 
-def parse_article(item) -> dict | None:
+def parse_article(item,
+                  feed_name: str = "",
+                  feed_category: str = "AI & Tech") -> dict | None:
     """Parse a feedparser entry into an article dict. Returns None if invalid."""
     if not item:
         return None
@@ -453,7 +469,7 @@ def parse_article(item) -> dict | None:
         logger.warning(f"No URL found for: {title[:50]}")
         # Don't return None - keep article but log the missing URL
 
-    # Get source name
+    # Get source name — fall back to feed_name
     source_name = ""
     if hasattr(item, "source"):
         src = item.source
@@ -461,9 +477,17 @@ def parse_article(item) -> dict | None:
             source_name = src.get("title", src.get("name", ""))
         elif hasattr(src, "title"):
             source_name = src.title
+    if not source_name and feed_name:
+        source_name = feed_name
 
     pub_dt = parse_date(item)
+    has_date = pub_dt is not None
     pub_str = pub_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if pub_dt else ""
+
+    # Auto-categorize, fall back to feed_category
+    category = auto_categorize(title, summary)
+    if category == "AI & Tech" and feed_category and feed_category != "AI & Tech":
+        category = feed_category
 
     article = {
         "title": title,
@@ -472,7 +496,8 @@ def parse_article(item) -> dict | None:
         "source_url": source_url,
         "published_at": pub_str,
         "pub_dt": pub_dt,
-        "category": auto_categorize(title, summary),
+        "has_date": has_date,
+        "category": category,
     }
 
     logger.debug(
@@ -485,191 +510,300 @@ def parse_article(item) -> dict | None:
 
 def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
     """
-    Fetch latest AI and tech news from RSS feeds.
-    Always tries to include source URLs.
-    Falls back gracefully if duplicates filter removes too many articles.
+    Fetch AI and tech news with STRICT rules:
+    - Primary: last {hours}hrs only
+    - Extended: last 72hrs only if primary has < count articles
+    - Hard cutoff: NEVER older than 72hrs (no exceptions)
+    - Never repeat published articles
+    - Research feeds only in extended tiers
     """
     from modules.utils import is_article_published
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    now = datetime.now(timezone.utc)
+    primary_cutoff = now - timedelta(hours=hours)
+    hard_cutoff    = now - timedelta(hours=72)
 
-    # Collect ALL articles from all feeds
-    all_articles = []
+    logger.info(
+        f"News fetch | window: {hours}hrs | "
+        f"primary: {primary_cutoff.strftime('%d %b %H:%M UTC')} | "
+        f"hard limit: {hard_cutoff.strftime('%d %b %H:%M UTC')}"
+    )
 
+    # ─────────────────────────────────────────────
+    # COLLECT from primary feeds
+    # ─────────────────────────────────────────────
+    primary_raw = []
     for feed_info in AI_TECH_FEEDS:
         try:
-            logger.info(f"Fetching: {feed_info['name']}")
             feed = feedparser.parse(feed_info["url"])
-
             if not feed.entries:
-                logger.warning(f"No entries: {feed_info['name']}")
+                logger.debug(f"Empty feed: {feed_info['name']}")
                 continue
-
-            for entry in feed.entries[:10]:
-                article = parse_article(entry)
-                if not article:
-                    continue
-
-                # Quality filter
-                if not meets_quality_standards(article):
-                    continue
-
-                # Add feed name if no source
-                if not article["source_name"]:
-                    article["source_name"] = feed_info["name"]
-
-                all_articles.append(article)
-
+            for entry in feed.entries[:15]:
+                article = parse_article(
+                    entry,
+                    feed_info["name"],
+                    feed_info.get("category", "AI & Tech")
+                )
+                if article:
+                    primary_raw.append(article)
         except Exception as e:
             logger.error(f"Feed error {feed_info['name']}: {e}")
-            continue
 
-    logger.info(f"Total collected: {len(all_articles)} from all feeds")
+    logger.info(f"Primary feeds collected: {len(primary_raw)}")
 
-    # Sort by date newest first — None dates go to end
-    all_articles.sort(
-        key=lambda x: (
-            x.get("pub_dt") is not None,
-            x.get("pub_dt") or datetime.min.replace(tzinfo=timezone.utc)
-        ),
-        reverse=True
-    )
+    # ─────────────────────────────────────────────
+    # COLLECT from research feeds
+    # ─────────────────────────────────────────────
+    research_raw = []
+    for feed_info in RESEARCH_FEEDS:
+        try:
+            feed = feedparser.parse(feed_info["url"])
+            if not feed.entries:
+                continue
+            for entry in feed.entries[:10]:
+                article = parse_article(
+                    entry,
+                    feed_info["name"],
+                    feed_info.get("category", "AI Research")
+                )
+                if article:
+                    research_raw.append(article)
+        except Exception as e:
+            logger.error(f"Research feed error {feed_info['name']}: {e}")
 
-    # Remove duplicates by title
-    seen_titles = set()
-    unique_articles = []
-    for article in all_articles:
-        title_key = article["title"].lower()[:60]
-        if title_key not in seen_titles:
-            seen_titles.add(title_key)
-            unique_articles.append(article)
+    logger.info(f"Research feeds collected: {len(research_raw)}")
 
-    logger.info(f"After dedup: {len(unique_articles)} articles")
-
+    # ─────────────────────────────────────────────
     # Add relevance scores
-    for article in unique_articles:
+    # ─────────────────────────────────────────────
+    for article in primary_raw + research_raw:
         article["relevance_score"] = calculate_relevance_score(
-            article["title"],
-            article["summary"]
+            article["title"], article["summary"]
         )
 
-    # Sort by relevance score first, then date — None dates go to end
-    unique_articles.sort(
-        key=lambda x: (
-            x.get("relevance_score", 0),
-            x.get("pub_dt") is not None,
-            x.get("pub_dt") or datetime.min.replace(tzinfo=timezone.utc)
-        ),
-        reverse=True
-    )
+    # ─────────────────────────────────────────────
+    # HARD FILTER — applied to ALL articles, no exceptions
+    # Rejects:
+    #   1. No valid date (unknown age = unsafe)
+    #   2. Older than 72hr hard cutoff
+    #   3. Already published (duplicate check)
+    # ─────────────────────────────────────────────
+    def hard_filter(articles: list, label: str = "") -> list:
+        kept = []
+        rejected_no_date  = 0
+        rejected_old      = 0
+        rejected_dup      = 0
 
-    if unique_articles:
-        logger.info(
-            f"Top article score: "
-            f"{unique_articles[0].get('relevance_score', 0)}"
-        )
-
-    # STRATEGY: Try multiple filters in order
-    # Always prefer articles WITH source URLs
-
-    def filter_articles(articles, check_time=True,
-                        check_published=True, require_url=True):
-        results = []
         for a in articles:
-            if check_time:
-                pub_dt = a.get("pub_dt")
-                if pub_dt and pub_dt < cutoff:
-                    continue
+            pub_dt   = a.get("pub_dt")
+            has_date = a.get("has_date", False)
+            title    = a.get("title", "")[:50]
+            url      = a.get("source_url", "")
 
-            if check_published:
-                url = a.get("source_url", "")
-                if url and is_article_published(url):
-                    continue
+            # Rule 1: Must have a valid date
+            if not has_date or pub_dt is None:
+                rejected_no_date += 1
+                logger.debug(f"REJECT no-date: {title}")
+                continue
 
-            if require_url:
-                if not a.get("source_url"):
-                    continue
+            # Rule 2: Must be within 72hr hard cutoff
+            if pub_dt < hard_cutoff:
+                rejected_old += 1
+                age_days = (now - pub_dt).total_seconds() / 86400
+                logger.debug(f"REJECT too old ({age_days:.1f}d): {title}")
+                continue
 
-            results.append(a)
-            if len(results) >= count:
-                break
-        return results
+            # Rule 3: Must not already be published
+            if url and is_article_published(url):
+                rejected_dup += 1
+                logger.debug(f"REJECT duplicate: {title}")
+                continue
 
-    # Try 1: Fresh + not published + has URL (ideal)
-    result = filter_articles(
-        unique_articles,
-        check_time=True,
-        check_published=True,
-        require_url=True
+            kept.append(a)
+
+        if label:
+            logger.info(
+                f"Hard filter [{label}]: kept={len(kept)} | "
+                f"no_date={rejected_no_date} | "
+                f"old={rejected_old} | dup={rejected_dup}"
+            )
+
+        return kept
+
+    primary_filtered  = hard_filter(primary_raw,  "primary")
+    research_filtered = hard_filter(research_raw, "research")
+
+    total_rejected = (
+        len(primary_raw)  - len(primary_filtered) +
+        len(research_raw) - len(research_filtered)
     )
-    logger.info(f"Try 1 (ideal): {len(result)}")
-
-    if len(result) >= count:
-        result = result[:count]
-        _clean_pub_dt(result)
-        return result
-
-    # Try 2: Not published + has URL (relax time)
-    if len(result) < 3:
-        result = filter_articles(
-            unique_articles,
-            check_time=False,
-            check_published=True,
-            require_url=True
+    if total_rejected > 0:
+        logger.warning(
+            f"Hard filter rejected {total_rejected} articles total"
         )
-        logger.info(f"Try 2 (relax time): {len(result)}")
 
-    if len(result) >= count:
-        result = result[:count]
-        _clean_pub_dt(result)
+    # ─────────────────────────────────────────────
+    # Deduplication by title
+    # ─────────────────────────────────────────────
+    def dedup(articles: list) -> list:
+        seen, result = set(), []
+        for a in articles:
+            key = a["title"].lower().strip()[:60]
+            if key not in seen:
+                seen.add(key)
+                result.append(a)
         return result
 
-    # Try 3: Has URL only (ignore published/time)
-    if len(result) < 3:
-        result = filter_articles(
-            unique_articles,
-            check_time=False,
-            check_published=False,
-            require_url=True
+    primary_filtered  = dedup(primary_filtered)
+    research_filtered = dedup(research_filtered)
+
+    # ─────────────────────────────────────────────
+    # Sort by relevance + recency
+    # ─────────────────────────────────────────────
+    def smart_sort(articles: list) -> list:
+        return sorted(
+            articles,
+            key=lambda x: (
+                x.get("relevance_score", 0),
+                x.get("pub_dt") or datetime.min.replace(tzinfo=timezone.utc)
+            ),
+            reverse=True
         )
-        logger.info(f"Try 3 (url only): {len(result)}")
 
-    if len(result) >= count:
-        result = result[:count]
-        _clean_pub_dt(result)
-        return result
+    primary_filtered  = smart_sort(primary_filtered)
+    research_filtered = smart_sort(research_filtered)
 
-    # Try 4: Absolutely anything (last resort)
-    if len(result) < 3:
-        logger.warning("Last resort: no URL requirement")
-        result = filter_articles(
-            unique_articles,
-            check_time=False,
-            check_published=False,
-            require_url=False
-        )[:count]
-        logger.info(f"Try 4 (anything): {len(result)}")
+    # ─────────────────────────────────────────────
+    # Separate by time window (post hard-filter)
+    # ─────────────────────────────────────────────
+    primary_fresh    = [a for a in primary_filtered
+                        if a["pub_dt"] >= primary_cutoff]
+    primary_extended = [a for a in primary_filtered
+                        if a["pub_dt"] < primary_cutoff]
+    research_fresh   = [a for a in research_filtered
+                        if a["pub_dt"] >= primary_cutoff]
+    research_extended = [a for a in research_filtered
+                         if a["pub_dt"] < primary_cutoff]
 
-    _clean_pub_dt(result)
-
-    # Final URL report
-    with_url = sum(1 for a in result if a.get("source_url"))
-    without_url = len(result) - with_url
     logger.info(
-        f"Final: {len(result)} articles | "
-        f"with URL: {with_url} | without URL: {without_url}"
+        f"Categorized: "
+        f"primary_fresh={len(primary_fresh)} "
+        f"primary_extended={len(primary_extended)} "
+        f"research_fresh={len(research_fresh)} "
+        f"research_extended={len(research_extended)}"
     )
 
-    if without_url > 0:
-        logger.warning(f"{without_url} articles missing URLs!")
+    # ─────────────────────────────────────────────
+    # Build result using tiered approach
+    # ─────────────────────────────────────────────
+    result     = []
+    seen_titles = set()
 
+    def add_articles(pool: list, label: str, need_url: bool = True) -> int:
+        added = 0
+        for a in pool:
+            if len(result) >= count:
+                break
+            key = a["title"].lower()[:60]
+            if key in seen_titles:
+                continue
+            if need_url and not a.get("source_url"):
+                continue
+            result.append(a)
+            seen_titles.add(key)
+            added += 1
+        if added > 0:
+            logger.info(
+                f"Added {added} from {label} | total: {len(result)}/{count}"
+            )
+        return added
+
+    # TIER 1: Primary feeds, primary window, with URL
+    add_articles(primary_fresh,
+                 f"primary fresh ({hours}hrs)", need_url=True)
+    if len(result) >= count:
+        _log_final(result, hours, now)
+        _clean_pub_dt(result)
+        return result
+
+    # TIER 2: Research feeds, primary window, with URL
+    add_articles(research_fresh,
+                 f"research fresh ({hours}hrs)", need_url=True)
+    if len(result) >= count:
+        _log_final(result, hours, now)
+        _clean_pub_dt(result)
+        return result
+
+    # Not enough in primary window — extend to 72hrs
+    if len(result) < count:
+        logger.warning(
+            f"Only {len(result)} articles in last {hours}hrs. "
+            f"Extending window to 72hrs."
+        )
+
+    # TIER 3: Primary feeds, extended window (up to 72hrs), with URL
+    add_articles(primary_extended,
+                 "primary extended (72hrs)", need_url=True)
+    if len(result) >= count:
+        _log_final(result, hours, now)
+        _clean_pub_dt(result)
+        return result
+
+    # TIER 4: Research feeds, extended window (up to 72hrs), with URL
+    add_articles(research_extended,
+                 "research extended (72hrs)", need_url=True)
+    if len(result) >= count:
+        _log_final(result, hours, now)
+        _clean_pub_dt(result)
+        return result
+
+    # TIER 5: Last resort — relax URL requirement, still within 72hrs
+    if len(result) < 3:
+        logger.warning("Very few articles. Relaxing URL requirement.")
+        all_filtered = dedup(smart_sort(primary_filtered + research_filtered))
+        add_articles(all_filtered, "any (no url req)", need_url=False)
+
+    _log_final(result, hours, now)
+    _clean_pub_dt(result)
     return result
 
 
+def _log_final(articles: list, hours: int, now: datetime):
+    """Log final article selection; error on any 72hr violation."""
+    logger.info(f"=== FINAL: {len(articles)} articles ===")
+    violations = 0
+    hard_cutoff = now - timedelta(hours=72)
+    for i, a in enumerate(articles, 1):
+        pub_dt = a.get("pub_dt")
+        url    = "URL:OK" if a.get("source_url") else "URL:MISSING"
+        if pub_dt:
+            age_hrs  = (now - pub_dt).total_seconds() / 3600
+            age_days = age_hrs / 24
+            if pub_dt < hard_cutoff:
+                status = f"VIOLATION {age_days:.1f}days!"
+                violations += 1
+            elif age_hrs <= hours:
+                status = f"FRESH {age_hrs:.1f}hrs"
+            else:
+                status = f"EXTENDED {age_hrs:.1f}hrs"
+        else:
+            status = "NO-DATE"
+        logger.info(f"  {i}. [{status}] [{url}] {a['title'][:50]}")
+    if violations > 0:
+        logger.error(
+            f"CRITICAL: {violations} articles violated 72hr hard cutoff!"
+        )
+    else:
+        logger.info("All articles within 72hr limit")
+
+
 def _clean_pub_dt(articles: list):
-    """Remove internal pub_dt field."""
+    """Remove internal-only fields before returning to caller."""
     for a in articles:
         a.pop("pub_dt", None)
+        a.pop("has_date", None)
+        a.pop("is_research", None)
 
 
 def check_feed_health() -> dict:
@@ -746,41 +880,74 @@ def format_articles_for_telegram(
     if not articles:
         return (
             f"No AI & Tech news found "
-            f"for last {time_period}."
+            f"for last {time_period}. "
+            f"Will retry next schedule."
         )
 
-    now = datetime.now().strftime("%d %b %Y %H:%M")
+    now = datetime.now(timezone.utc)
+
+    # Find actual date range of articles
+    dates = []
+    for a in articles:
+        pub = a.get("published_at", "")
+        if pub:
+            try:
+                dt = datetime.strptime(
+                    pub, "%Y-%m-%dT%H:%M:%SZ"
+                ).replace(tzinfo=timezone.utc)
+                dates.append(dt)
+            except Exception:
+                pass
+
+    if dates:
+        oldest = min(dates)
+        newest = max(dates)
+        age_range = (
+            f"{oldest.strftime('%d %b %H:%M')} - "
+            f"{newest.strftime('%d %b %H:%M UTC')}"
+        )
+    else:
+        age_range = "Date unknown"
 
     # Count categories
     categories = {}
     for a in articles:
         cat = a.get("category", "AI & Tech")
         categories[cat] = categories.get(cat, 0) + 1
-
     cat_summary = " | ".join(
-        f"{cat}: {count}"
-        for cat, count in categories.items()
+        f"{c}:{n}" for c, n in categories.items()
     )
 
     lines = [
-        f"AI & Tech News — {now}",
-        f"Period: past {time_period}",
+        f"AI & Tech News",
+        f"Window: last {time_period} | Coverage: {age_range}",
         f"Topics: {cat_summary}",
-        "─" * 30,
+        "─" * 35,
         "",
     ]
 
     for i, article in enumerate(articles, 1):
-        pub_time = ""
-        if article.get("published_at"):
+        pub = article.get("published_at", "")
+        pub_display = ""
+
+        if pub:
             try:
                 dt = datetime.strptime(
-                    article["published_at"],
-                    "%Y-%m-%dT%H:%M:%SZ"
+                    pub, "%Y-%m-%dT%H:%M:%SZ"
                 ).replace(tzinfo=timezone.utc)
-                pub_time = dt.strftime("%b %d, %H:%M")
+                age_hrs = (now - dt).total_seconds() / 3600
+
+                if age_hrs < 1:
+                    age_str = f"{int(age_hrs * 60)}min ago"
+                elif age_hrs < 24:
+                    age_str = f"{age_hrs:.1f}hrs ago"
+                else:
+                    age_str = f"{int(age_hrs / 24)}d ago"
+                pub_display = (
+                    f"{dt.strftime('%d %b %H:%M')} ({age_str})"
+                )
             except Exception:
-                pub_time = ""
+                pub_display = pub[:16]
 
         source_name = article.get("source_name", "")
         source_url = article.get("source_url", "")
@@ -790,37 +957,32 @@ def format_articles_for_telegram(
 
         block = f"{i}. {title}\n"
         block += f"[{category}]"
-        if pub_time:
-            block += f" • {pub_time}"
+        if pub_display:
+            block += f" • {pub_display}"
         if source_name:
             block += f" • {source_name}"
         block += "\n"
-        if summary:
-            short_summary = summary[:200]
-            if len(summary) > 200:
-                short_summary += "..."
-            block += f"{short_summary}\n"
 
-        # NEVER skip this - source link is critical
+        if summary:
+            short = summary[:180]
+            if len(summary) > 180:
+                short += "..."
+            block += f"{short}\n"
+
+        # CRITICAL - never skip source link
         if source_url:
             block += f"Link: {source_url}\n"
         else:
             logger.warning(
-                f"MISSING URL for article {i}: "
-                f"{title[:50]}"
+                f"No URL for article {i}: {title[:50]}"
             )
 
         lines.append(block)
 
-    # Summary stats
-    with_url = sum(
-        1 for a in articles
-        if a.get("source_url")
-    )
+    with_url = sum(1 for a in articles if a.get("source_url"))
     lines.append(
-        "─" * 30 + "\n"
-        f"{len(articles)} stories | "
-        f"{with_url} with source links"
+        "─" * 35 + "\n"
+        f"{len(articles)} stories | {with_url} with links"
     )
 
     return "\n".join(lines)

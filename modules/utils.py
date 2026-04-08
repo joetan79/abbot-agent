@@ -404,7 +404,8 @@ def is_article_published(url: str) -> bool:
     published = _load(PUBLISHED_ARTICLES_FILE)
     return url in published
 
-def mark_article_published(url: str, title: str):
+def mark_article_published(url: str, title: str,
+                            pub_date: str = ""):
     """Mark article as published so it won't repeat."""
     if not url:
         return
@@ -412,7 +413,8 @@ def mark_article_published(url: str, title: str):
     published = _load(PUBLISHED_ARTICLES_FILE)
     published[url] = {
         "title": title[:100],
-        "published_at": datetime.now().isoformat()
+        "marked_at": datetime.now().isoformat(),
+        "pub_date": pub_date,   # original article publish date
     }
     # Auto-clean if too large — keep 7-day window
     if len(published) > 1000:
@@ -422,7 +424,7 @@ def mark_article_published(url: str, title: str):
         published = {
             u: data
             for u, data in published.items()
-            if data.get("published_at", "") > cutoff
+            if data.get("marked_at", "") > cutoff
         }
         logger.info("Auto-cleaned published articles")
     _save(PUBLISHED_ARTICLES_FILE, published)
@@ -438,7 +440,7 @@ def clear_old_published(days: int = 7):
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     cleaned = {
         url: data for url, data in published.items()
-        if data.get("published_at", "") > cutoff
+        if data.get("marked_at", data.get("published_at", "")) > cutoff
     }
     _save(PUBLISHED_ARTICLES_FILE, cleaned)
     removed = len(published) - len(cleaned)

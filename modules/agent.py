@@ -301,7 +301,8 @@ async def run_scheduled_job(bot, job_id: str, action: str):
             for article in news_articles:
                 mark_article_published(
                     article.get("source_url", ""),
-                    article.get("title", "")
+                    article.get("title", ""),
+                    article.get("published_at", ""),
                 )
             logger.info(
                 f"Marked {len(news_articles)} articles as published"
