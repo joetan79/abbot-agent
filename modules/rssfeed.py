@@ -4,10 +4,11 @@ Free, no API key, real-time updates.
 """
 
 import re
+import time
+import email.utils
 import feedparser
 import logging
 from datetime import datetime, timezone, timedelta
-from time import mktime
 from modules.utils import is_article_published, mark_article_published
 
 logger = logging.getLogger(__name__)
@@ -298,22 +299,91 @@ def meets_quality_standards(article: dict) -> bool:
     return True
 
 
-def parse_date(entry) -> datetime:
-    """Parse RSS entry date to datetime object."""
-    try:
-        if hasattr(entry, "published_parsed") and entry.published_parsed:
-            return datetime.fromtimestamp(
-                mktime(entry.published_parsed),
-                tz=timezone.utc
-            )
-        if hasattr(entry, "updated_parsed") and entry.updated_parsed:
-            return datetime.fromtimestamp(
-                mktime(entry.updated_parsed),
-                tz=timezone.utc
-            )
-    except Exception:
-        pass
-    return datetime.now(timezone.utc)
+def parse_date(entry) -> datetime | None:
+    """
+    Parse RSS entry date accurately.
+    Returns None if date cannot be determined.
+    NEVER falls back to datetime.now() — that would make
+    undated articles always pass the time filter.
+    """
+    now = datetime.now(timezone.utc)
+    one_year_ago = now - timedelta(days=365)
+    one_day_future = now + timedelta(days=1)
+
+    # Try feedparser's pre-parsed time structs first (most reliable)
+    for attr in ["published_parsed", "updated_parsed", "created_parsed"]:
+        val = getattr(entry, attr, None)
+        if val is None and isinstance(entry, dict):
+            val = entry.get(attr)
+
+        if val is not None:
+            try:
+                timestamp = time.mktime(val)
+                dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                if one_year_ago <= dt <= one_day_future:
+                    return dt
+                else:
+                    logger.debug(f"Date out of range: {dt}")
+            except Exception as e:
+                logger.debug(f"Date parse error for {attr}: {e}")
+                continue
+
+    # Try string date fields
+    date_strings = []
+    for attr in ["published", "updated", "created", "date"]:
+        val = getattr(entry, attr, None)
+        if val is None and isinstance(entry, dict):
+            val = entry.get(attr)
+        if val and isinstance(val, str):
+            date_strings.append(val.strip())
+
+    for date_str in date_strings:
+        if not date_str:
+            continue
+
+        dt = None
+
+        # Try email/RFC 2822 format (most common in RSS)
+        # e.g. "Mon, 07 Apr 2026 10:30:00 +0800"
+        try:
+            parsed = email.utils.parsedate_to_datetime(date_str)
+            dt = parsed.astimezone(timezone.utc)
+        except Exception:
+            pass
+
+        # Try ISO 8601 formats
+        if dt is None:
+            iso_formats = [
+                "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%dT%H:%M:%SZ",
+                "%Y-%m-%dT%H:%M:%S.%f%z",
+                "%Y-%m-%dT%H:%M:%S.%fZ",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d",
+            ]
+            for fmt in iso_formats:
+                try:
+                    dt = datetime.strptime(date_str[:len(fmt) + 5], fmt)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    else:
+                        dt = dt.astimezone(timezone.utc)
+                    break
+                except Exception:
+                    continue
+
+        if dt is not None:
+            if one_year_ago <= dt <= one_day_future:
+                return dt
+            else:
+                logger.debug(f"Date string out of range: {date_str} -> {dt}")
+
+    # Could not determine date
+    logger.debug(
+        f"Could not parse date for: "
+        f"{getattr(entry, 'title', 'unknown')[:50]}"
+    )
+    return None  # NEVER return datetime.now()
 
 
 def parse_article(item) -> dict | None:
@@ -393,7 +463,7 @@ def parse_article(item) -> dict | None:
             source_name = src.title
 
     pub_dt = parse_date(item)
-    pub_str = pub_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    pub_str = pub_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if pub_dt else ""
 
     article = {
         "title": title,
@@ -646,14 +716,17 @@ def fetch_crypto_news(count: int = 3) -> list:
                     "source_name": feed_info["name"],
                     "source_url": article_url,
                     "published_at": pub_dt.strftime(
-                        "%Y-%m-%dT%H:%M:%SZ"),
+                        "%Y-%m-%dT%H:%M:%SZ") if pub_dt else "",
                     "pub_dt": pub_dt,
                 })
         except Exception as e:
             logger.error(f"Crypto RSS error {feed_info['name']}: {e}")
             continue
 
-    all_articles.sort(key=lambda x: x["pub_dt"], reverse=True)
+    all_articles.sort(
+        key=lambda x: x["pub_dt"] or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True
+    )
     result = all_articles[:count]
     for a in result:
         a.pop("pub_dt", None)
