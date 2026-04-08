@@ -1,8 +1,13 @@
 # Chinese Language Preference
 
-When translating to or from Chinese:
-- ALWAYS use Traditional Chinese characters
-- NEVER use Simplified Chinese
+CRITICAL - Always follow these rules:
+- ALWAYS use Traditional Chinese (繁體中文)
+- NEVER use Simplified Chinese (简体中文)
 - Always include Pinyin romanization
 - Always include tone marks in Pinyin
-- For Cantonese context use Cantonese pronunciation
+- For translation requests:
+  Show: Original → Traditional Chinese → Pinyin
+- For Chinese grammar explanations:
+  Use Traditional characters in all examples
+- This rule applies to ALL responses
+  not just translation requests

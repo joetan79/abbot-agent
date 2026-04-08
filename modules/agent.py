@@ -20,7 +20,7 @@ from .utils import (
     get_cached_news, set_cached_news,
     MODEL_FAST, MODEL_SMART,
 )
-from .skills_loader import load_skills, list_skills
+from .skills_loader import load_skills, list_skills, get_skill_token_estimate
 
 def build_owner_system_prompt(user_id: str, text: str) -> str:
     """Build a rich, context-aware system prompt for the owner."""
@@ -50,7 +50,7 @@ def build_owner_system_prompt(user_id: str, text: str) -> str:
         for j in list(schedules.values())[:5]
     ) or "No active schedules"
 
-    skills_text = load_skills()
+    skills_text = load_skills(scope="core")
 
     return f"""You are ABbot - a professional AI agent.
 
@@ -310,7 +310,10 @@ async def run_scheduled_job(bot, job_id: str, action: str):
 
             # Use Claude to enhance summaries if needed
             system = (
-                "You are an AI news analyst. "
+                f"{load_skills(scope='news')}\n\n"
+                "You are ABbot news reporter. "
+                f"Today: {now}. "
+                "Report the top AI and tech news. "
                 "The following are real news articles "
                 "fetched from a live news API. "
                 "For each article, if the summary seems "
@@ -406,7 +409,9 @@ async def run_scheduled_job(bot, job_id: str, action: str):
     elif action in ("crypto", "crypto_snapshot") or \
          any(c in action.lower() for c in ["btc", "eth", "sol", "crypto"]):
         system = (
-            f"You are a crypto analyst. Current date and time: {now}. "
+            f"{load_skills(scope='crypto')}\n\n"
+            f"You are ABbot crypto reporter. "
+            f"Today: {now}. "
             "Search for LIVE current cryptocurrency prices RIGHT NOW. "
             "Use search to find prices from the last 1 hour only. "
             "If price data is older than 2 hours, say 'Price data may be delayed'. "
@@ -700,14 +705,27 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_chat.id): return
     skills = list_skills()
+    estimates = get_skill_token_estimate()
+
     if not skills:
         await update.message.reply_text(
-            "No skills loaded yet.\n\n"
-            "Add .md files to the skills/ folder to teach ABbot new behaviors!"
+            "No skills loaded yet.\n"
+            "Add .md files to skills/ folder."
         )
         return
-    skill_list = "\n".join(f"• {s}" for s in skills)
-    await update.message.reply_text(
-        f"Loaded Skills ({len(skills)}):\n\n{skill_list}\n\n"
-        f"Add .md files to skills/ folder to add more."
+
+    total_tokens = sum(estimates.values())
+    lines = [
+        f"Loaded Skills ({len(skills)})",
+        f"Total: ~{total_tokens} tokens/request",
+        "",
+    ]
+    for s in skills:
+        tokens = estimates.get(s, 0)
+        lines.append(f"• {s} (~{tokens} tokens)")
+
+    lines.append(
+        f"\nEdit skills/ folder to customize "
+        f"ABbot behavior without code changes."
     )
+    await update.message.reply_text("\n".join(lines))
