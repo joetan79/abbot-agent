@@ -526,9 +526,12 @@ def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
 
     logger.info(f"Total collected: {len(all_articles)} from all feeds")
 
-    # Sort by date newest first
+    # Sort by date newest first — None dates go to end
     all_articles.sort(
-        key=lambda x: x.get("pub_dt", datetime.now(timezone.utc)),
+        key=lambda x: (
+            x.get("pub_dt") is not None,
+            x.get("pub_dt") or datetime.min.replace(tzinfo=timezone.utc)
+        ),
         reverse=True
     )
 
@@ -550,11 +553,12 @@ def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
             article["summary"]
         )
 
-    # Sort by relevance score first, then date
+    # Sort by relevance score first, then date — None dates go to end
     unique_articles.sort(
         key=lambda x: (
             x.get("relevance_score", 0),
-            x.get("pub_dt", datetime.now(timezone.utc))
+            x.get("pub_dt") is not None,
+            x.get("pub_dt") or datetime.min.replace(tzinfo=timezone.utc)
         ),
         reverse=True
     )
