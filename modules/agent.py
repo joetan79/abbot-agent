@@ -293,7 +293,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
             )
 
         if news_articles:
-            # Format for Telegram
+            # Format for Telegram using our formatter - never use Claude for this
             text = format_articles_for_telegram(news_articles, time_period)
 
             # Mark articles as published to prevent duplicates
@@ -308,23 +308,6 @@ async def run_scheduled_job(bot, job_id: str, action: str):
                 f"Marked {len(news_articles)} articles as published"
             )
 
-            # Use Claude to enhance summaries if needed
-            system = (
-                f"{load_skills(scope='news')}\n\n"
-                "You are ABbot news reporter. "
-                f"Today: {now}. "
-                "Report the top AI and tech news. "
-                "The following are real news articles "
-                "fetched from a live news API. "
-                "For each article, if the summary seems "
-                "too short or cut off, expand it slightly "
-                "based on the title context. "
-                "Keep the exact format. Plain text only."
-            )
-            enhanced = ask_claude(system, text, max_tokens=2000, model=MODEL_FAST)
-            if not is_failed_response(enhanced):
-                text = enhanced
-
             # Prepare articles for website
             articles = [{
                 "title": a["title"],
@@ -334,23 +317,9 @@ async def run_scheduled_job(bot, job_id: str, action: str):
             } for a in news_articles]
 
         else:
-            # Fallback to Claude web search if NewsAPI fails
-            logger.warning("NewsAPI failed, falling back to web search")
-            system = (
-                f"You are a tech news analyst. Today: {now}. "
-                "Find the 5 most recent AI and tech news. "
-                "Plain text, numbered list, title then summary. "
-                "No explanations about search limitations."
-            )
-            text = ask_claude_with_search(
-                system,
-                f"latest AI tech news {datetime.now().strftime('%B %d %Y')}",
-                max_tokens=2000,
-                model=MODEL_FAST,
-            )
-            text = clean_response(text)
-            text = f"AI & Tech News (past {time_period})\n\n{text}"
-            articles = parse_news_articles(text)
+            logger.warning("No articles found from RSS feed")
+            text = f"No AI & Tech news found for last {time_period}."
+            articles = []
 
         # -- Publish to website --
         if articles:

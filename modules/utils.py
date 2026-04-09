@@ -18,6 +18,12 @@ def clean_response(text: str) -> str:
     text = re.sub(r'</cite>', '', text)
     # Remove any other HTML-like tags
     text = re.sub(r'<[^>]+>', '', text)
+    # Remove markdown bold **text**
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+    # Remove markdown italic *text*
+    text = re.sub(r'\*([^*]+)\*', r'\1', text)
+    # Remove markdown headers ## text
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
     # Remove Claude thinking/searching phrases line by line
     skip_phrases = [
         "i'll search",
@@ -33,6 +39,10 @@ def clean_response(text: str) -> str:
         "i recommend checking",
         "these sources would",
         "without access to real-time",
+        "here are the top",
+        "here are some",
+        "based on my",
+        "i recommend checking",
     ]
     lines = text.split('\n')
     cleaned_lines = []
