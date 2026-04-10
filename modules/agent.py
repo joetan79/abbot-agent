@@ -11,6 +11,7 @@ from .utils import (
     is_owner, is_allowed,
     memory_set, memory_get, memory_all, memory_delete,
     preference_all, get_preferences_prompt,
+    get_topic_preferences,
     history_add, history_get, history_clear, history_summary,
     auto_extract_memory,
     schedule_save, schedule_load_all, schedule_delete,
@@ -260,20 +261,43 @@ async def run_scheduled_job(bot, job_id: str, action: str):
     now  = datetime.now().strftime("%A, %d %B %Y %H:%M")
 
     if action == "weather":
-        system = (
-            f"Find current weather for {city}. "
-            "Format:\n"
-            "Temperature: High XXC / Low XXC\n"
-            "Condition: Sunny/Cloudy/Rainy\n"
-            "Rain chance: XX%\n"
-            "Wind: XX km/h\n"
-            "Humidity: XX%\n"
-            "Tip: what to wear today.\n"
-            "Plain text only."
+        # Get city from job-specific memory or fall back to default memory city
+        city = (
+            memory_get(f"city_{job_id}", None) or
+            memory_get("city", "Kuala Lumpur")
         )
-        msg = ask_claude_news(system, f"Current weather in {city} today {now}")
+
+        # Load weather skill for formatting guidelines
+        weather_skill = load_skills(scope="weather")
+
+        # Build preference text from user memory
+        prefs_text = get_topic_preferences("weather")
+        if not prefs_text:
+            prefs_text = "Use default weather format from guidelines below."
+
+        system = (
+            f"{weather_skill}\n\n"
+            f"{prefs_text}\n\n"
+            f"You are ABbot weather reporter. "
+            f"City: {city}. "
+            f"Current date/time: {now}. "
+            f"Search for current weather in {city}. "
+            f"Follow user preferences exactly. "
+            f"Use the skill guidelines for format. "
+            f"If user wants Celsius, use Celsius. "
+            f"If user wants dew point, show it. "
+            f"Never ignore user preferences."
+        )
+
+        msg = ask_claude_with_search(
+            system,
+            f"Current weather in {city} right now "
+            f"{datetime.now().strftime('%d %B %Y %H:%M')}",
+            max_tokens=600,
+            model=MODEL_FAST,
+        )
         msg = clean_response(msg)
-        text = f"Weather Report - {city}\n\n{msg}"
+        text = msg
 
     elif action in ("news_ai", "news") or re.search(r'last\s+\d+\s+hours?', action.lower()):
         from modules.rssfeed import fetch_ai_news, format_articles_for_telegram
@@ -595,12 +619,38 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await run_scheduled_job(context.bot, "manual_news", "news_ai")
 
     elif intent == "weather":
-        # Extract city from message or use default
+        # Get city from message or memory
         job_city = intent_data.get("city") or memory_get("city", "Kuala Lumpur")
-        await update.message.chat.send_action("typing")
-        # Temporarily save city for this job
+
+        # Save city so run_scheduled_job picks it up via city_manual_weather
         memory_set("city_manual_weather", job_city)
-        await run_scheduled_job(context.bot, "manual_weather", "weather")
+
+        # Load weather skill and user preferences
+        weather_skill = load_skills(scope="weather")
+        prefs_text = get_topic_preferences("weather")
+        if not prefs_text:
+            prefs_text = "Use default format."
+
+        now = datetime.now().strftime("%A, %d %B %Y %H:%M")
+        system = (
+            f"{weather_skill}\n\n"
+            f"{prefs_text}\n\n"
+            f"You are ABbot weather reporter. "
+            f"City: {job_city}. "
+            f"Today: {now}."
+        )
+
+        await update.message.chat.send_action("typing")
+
+        msg = ask_claude_with_search(
+            system,
+            f"Current weather in {job_city} "
+            f"{datetime.now().strftime('%d %B %Y %H:%M')}",
+            max_tokens=600,
+            model=MODEL_FAST,
+        )
+        msg = clean_response(msg)
+        await update.message.reply_text(msg)
 
     elif intent == "report":
         await update.message.chat.send_action("typing")

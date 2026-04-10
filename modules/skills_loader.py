@@ -17,6 +17,7 @@ SKILL_PRIORITY = [
     "chinese_traditional",   # language rules
     "news_reporting",        # domain specific
     "crypto_reporting",      # domain specific
+    "weather_reporting",     # domain specific
     "study_assistant",       # domain specific
 ]
 
@@ -53,6 +54,11 @@ def load_skills(scope: str = "all") -> str:
             "response_style",
             "chinese_traditional",
             "study_assistant",
+        ],
+        "weather": [
+            "communication_style",
+            "response_style",
+            "weather_reporting",
         ],
         "all": SKILL_PRIORITY,
     }

@@ -341,6 +341,58 @@ Only extract clear explicit facts."""
         pass  # Silent fail — not critical
 
 
+def get_topic_preferences(topic: str) -> str:
+    """
+    Get memory preferences relevant to a topic.
+    topic: "weather", "news", "crypto", etc.
+    Returns formatted preference string.
+    """
+    all_mem = memory_all()
+    if not all_mem:
+        return ""
+
+    topic_keywords = {
+        "weather": [
+            "weather", "temperature", "temp",
+            "celsius", "fahrenheit", "dew",
+            "wind", "humidity", "rain", "uv",
+            "forecast", "climate",
+        ],
+        "news": [
+            "news", "report", "article",
+            "format", "style", "length",
+        ],
+        "crypto": [
+            "crypto", "bitcoin", "btc", "eth",
+            "price", "coin", "trading",
+        ],
+        "chinese": [
+            "chinese", "mandarin", "cantonese",
+            "traditional", "simplified",
+        ],
+    }
+
+    keywords = topic_keywords.get(topic, [topic])
+
+    relevant = {}
+    for key, value in all_mem.items():
+        key_lower = key.lower()
+        val_lower = str(value).lower()
+        if any(kw in key_lower or kw in val_lower
+               for kw in keywords):
+            relevant[key] = value
+
+    if not relevant:
+        return ""
+
+    lines = [f"Remembered {topic} preferences:"]
+    for k, v in relevant.items():
+        lines.append(f"- {k}: {v}")
+    lines.append("(These must be followed exactly)")
+
+    return "\n".join(lines)
+
+
 def ask_claude_with_search(system: str, user_msg: str,
                             user_id: str = None, max_tokens: int = 1500,
                             model: str = None) -> str:
