@@ -21,6 +21,7 @@ from modules.study import cmd_ask, cmd_math, cmd_chinese, cmd_homework, USER_PRO
 from modules.agent import (
     handle_owner_message, run_scheduled_job,
     cmd_tasks, cmd_schedules, cmd_memory, cmd_news, cmd_report, cmd_skills,
+    cmd_memories, cmd_forget,
 )
 
 logging.basicConfig(
@@ -40,6 +41,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/tasks - Pending tasks\n"
             "/schedules - Active schedules\n"
             "/memory - Stored memory\n"
+            "/memories - Memory by category\n"
+            "/forget <key> - Delete a memory\n"
             "/news - Latest AI & Tech news\n"
             "/report - Daily report\n"
             "/skills - Loaded skills\n"
@@ -261,6 +264,8 @@ async def main():
     app.add_handler(CommandHandler("clear",      cmd_clear_history))
     app.add_handler(CommandHandler("newsstatus", cmd_newsstatus))
     app.add_handler(CommandHandler("feedhealth", cmd_feedhealth))
+    app.add_handler(CommandHandler("memories",   cmd_memories))
+    app.add_handler(CommandHandler("forget",     cmd_forget))
     await app.bot.set_my_commands([
         BotCommand("start",     "Welcome & help"),
         BotCommand("tasks",     "View pending tasks"),
@@ -271,6 +276,8 @@ async def main():
         BotCommand("skills",    "View loaded AI skills"),
         BotCommand("newsstatus","News tracking stats"),
         BotCommand("feedhealth","Check RSS feed health"),
+        BotCommand("memories",  "View all stored memories"),
+        BotCommand("forget",    "Delete a memory entry"),
         BotCommand("clear",     "Clear conversation history"),
     ])
     logger.info("🤖 AgentBot is running...")

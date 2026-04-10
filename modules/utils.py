@@ -11,6 +11,85 @@ logger = logging.getLogger(__name__)
 MODEL_FAST = "claude-haiku-4-5-20251001"   # Simple tasks
 MODEL_SMART = "claude-sonnet-4-5"           # Complex tasks
 
+# ── Memory Categories ─────────────────────────────────────────────────────────
+MEMORY_CATEGORIES = {
+    "health": [
+        "meal", "food", "diet", "eat", "drink",
+        "medication", "medicine", "pill", "vitamin",
+        "exercise", "workout", "sleep", "health",
+        "doctor", "hospital", "sick", "weight",
+        "allergy", "supplement", "nutrition",
+    ],
+    "personal": [
+        "name", "wife", "husband", "child", "son",
+        "daughter", "family", "parent", "brother",
+        "sister", "friend", "birthday", "anniversary",
+        "address", "phone", "email", "hobby",
+        "interest", "preference", "like", "dislike",
+    ],
+    "work": [
+        "work", "job", "office", "meeting", "project",
+        "deadline", "client", "boss", "team", "task",
+        "report", "presentation", "conference", "call",
+        "business", "company", "colleague", "manager",
+    ],
+    "finance": [
+        "money", "budget", "expense", "income", "salary",
+        "investment", "saving", "bank", "loan", "debt",
+        "credit", "payment", "bill", "tax", "cost",
+        "finance", "financial", "spend", "profit",
+    ],
+    "travel": [
+        "travel", "trip", "flight", "hotel", "visa",
+        "passport", "holiday", "vacation", "destination",
+        "airport", "booking", "ticket", "tour", "city",
+    ],
+    "schedule": [
+        "schedule", "calendar", "appointment", "reminder",
+        "time", "daily", "weekly", "routine", "habit",
+        "morning", "evening", "night", "lunch", "dinner",
+    ],
+    "learning": [
+        "study", "learn", "course", "book", "read",
+        "class", "exam", "test", "school", "university",
+        "skill", "language", "practice", "homework",
+    ],
+    "preferences": [
+        "prefer", "always", "never", "must", "should",
+        "format", "style", "tone", "language", "unit",
+        "celsius", "fahrenheit", "traditional", "simplified",
+    ],
+}
+
+
+def categorize_memory(key: str, value: str) -> str:
+    """Determine category of a memory entry."""
+    text = (key + " " + str(value)).lower()
+    scores = {}
+    for category, keywords in MEMORY_CATEGORIES.items():
+        score = sum(1 for kw in keywords if kw in text)
+        if score > 0:
+            scores[category] = score
+    if not scores:
+        return "general"
+    return max(scores, key=scores.get)
+
+
+def memory_set_categorized(key: str, value):
+    """Save memory with auto-category tagging."""
+    mem = _load(MEMORY_FILE)
+    category = categorize_memory(key, str(value))
+    mem[key] = {
+        "value": value,
+        "category": category,
+        "updated": datetime.now().isoformat()
+    }
+    _save(MEMORY_FILE, mem)
+    logger.info(
+        f"Memory saved: [{category}] "
+        f"{key} = {str(value)[:50]}"
+    )
+
 
 def clean_response(text: str) -> str:
     # Remove citation tags like <cite index="0-1">...</cite>
@@ -107,21 +186,76 @@ def _save(path: Path, data: dict):
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
 def memory_set(key: str, value):
+    """Save memory with auto-categorization."""
     mem = _load(MEMORY_FILE)
-    mem[key] = {"value": value, "updated": datetime.now().isoformat()}
+    category = categorize_memory(key, str(value))
+    mem[key] = {
+        "value": value,
+        "category": category,
+        "updated": datetime.now().isoformat()
+    }
     _save(MEMORY_FILE, mem)
 
 def memory_get(key: str, default=None):
+    """Get memory value, handles both formats."""
     entry = _load(MEMORY_FILE).get(key)
-    return entry["value"] if entry else default
+    if entry is None:
+        return default
+    if isinstance(entry, dict):
+        return entry.get("value", default)
+    return entry  # old format compatibility
 
 def memory_all() -> dict:
-    return {k: v["value"] for k, v in _load(MEMORY_FILE).items()}
+    """Get all memories as key:value dict."""
+    mem = _load(MEMORY_FILE)
+    result = {}
+    for k, v in mem.items():
+        if isinstance(v, dict):
+            result[k] = v.get("value", "")
+        else:
+            result[k] = v
+    return result
 
 def memory_delete(key: str):
     mem = _load(MEMORY_FILE)
     mem.pop(key, None)
     _save(MEMORY_FILE, mem)
+
+def memory_get_by_category(category: str) -> dict:
+    """Get all memory entries for a category."""
+    mem = _load(MEMORY_FILE)
+    result = {}
+    for key, data in mem.items():
+        if isinstance(data, dict):
+            mem_cat = data.get(
+                "category",
+                categorize_memory(key, str(data.get("value", "")))
+            )
+            if mem_cat == category:
+                result[key] = data.get("value", "")
+        else:
+            if categorize_memory(key, str(data)) == category:
+                result[key] = data
+    return result
+
+def memory_get_all_categorized() -> dict:
+    """Get all memories organized by category."""
+    mem = _load(MEMORY_FILE)
+    categorized = {}
+    for key, data in mem.items():
+        if isinstance(data, dict):
+            value = data.get("value", "")
+            cat = data.get(
+                "category",
+                categorize_memory(key, str(value))
+            )
+        else:
+            value = data
+            cat = categorize_memory(key, str(data))
+        if cat not in categorized:
+            categorized[cat] = {}
+        categorized[cat][key] = value
+    return categorized
 
 def preference_set(key: str, value: str):
     """Store a long-term preference that persists and is always injected into prompts."""
@@ -155,6 +289,182 @@ def get_preferences_prompt() -> str:
         "These are permanent preferences. NEVER ignore them in any response."
     )
     return "\n".join(lines)
+
+
+def get_core_preferences() -> str:
+    """
+    Get only core preference memories.
+    Used when no specific category detected.
+    Minimal token usage.
+    """
+    all_mem = _load(MEMORY_FILE)
+    core_entries = {}
+    for key, data in all_mem.items():
+        if isinstance(data, dict):
+            value = data.get("value", "")
+            cat = data.get(
+                "category",
+                categorize_memory(key, str(value))
+            )
+        else:
+            value = data
+            cat = categorize_memory(key, str(data))
+        if cat == "preferences":
+            core_entries[key] = value
+    if not core_entries:
+        return ""
+    lines = ["CORE PREFERENCES:"]
+    for k, v in list(core_entries.items())[:10]:
+        lines.append(f"- {k}: {v}")
+    return "\n".join(lines)
+
+
+def get_relevant_memories(
+        query: str,
+        max_categories: int = 3,
+        max_entries_per_category: int = 5) -> str:
+    """
+    Get memories most relevant to the query.
+    Uses 3-layer selective injection to control token cost.
+
+    Layer 1 — Category keyword match:
+      Score query against category keyword lists.
+      Inject top matching categories.
+
+    Layer 2 — Direct key/value text search:
+      Search query words directly in all memory
+      keys and values. Catches named things like
+      "Whiskers", "ABC 1234" with no category hit.
+
+    Layer 3 — Safety net:
+      If nothing matched, return 3 most recently
+      updated memories so context is never empty.
+    """
+    if not query:
+        return get_core_preferences()
+
+    query_lower = query.lower()
+    # Meaningful words only (skip single/two-char words)
+    query_words = [w for w in query_lower.split() if len(w) > 2]
+
+    all_mem = _load(MEMORY_FILE)
+    result_lines = []
+    total_entries = 0
+    matched_keys: set = set()
+    # Tracks whether a specific/intentional match was found
+    # (beyond the automatic preferences baseline).
+    # Layer 3 fires when this stays False.
+    has_specific_match = False
+
+    # ── Layer 1: Category keyword scoring ────────────────────────────────────
+    category_scores = {}
+    for category, keywords in MEMORY_CATEGORIES.items():
+        score = sum(1 for kw in keywords if kw in query_lower)
+        if score > 0:
+            category_scores[category] = score
+
+    # Always include preferences (minimal baseline).
+    # Adding +1 means it never scores zero, but real hits
+    # (other categories or direct text) outscore it.
+    category_scores["preferences"] = \
+        category_scores.get("preferences", 0) + 1
+
+    top_categories = sorted(
+        category_scores.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )[:max_categories]
+
+    for category, score in top_categories:
+        cat_entries = {}
+        for key, data in all_mem.items():
+            if isinstance(data, dict):
+                value = data.get("value", "")
+                mem_cat = data.get(
+                    "category",
+                    categorize_memory(key, str(value))
+                )
+            else:
+                value = data
+                mem_cat = categorize_memory(key, str(data))
+            if mem_cat == category:
+                cat_entries[key] = value
+
+        if cat_entries:
+            limited = dict(
+                list(cat_entries.items())[:max_entries_per_category]
+            )
+            result_lines.append(f"\n[{category.upper()} MEMORIES]")
+            for k, v in limited.items():
+                result_lines.append(f"- {k}: {v}")
+                matched_keys.add(k)
+            total_entries += len(limited)
+            # Preferences is always included as baseline,
+            # so only count other categories as specific matches.
+            if category != "preferences":
+                has_specific_match = True
+
+    # ── Layer 2: Direct key/value text search ────────────────────────────────
+    # Catches named things ("Whiskers", "ABC 1234") that have no category hit.
+    if query_words:
+        direct_matches = {}
+        for key, data in all_mem.items():
+            if key in matched_keys:
+                continue  # already included from Layer 1
+            if isinstance(data, dict):
+                value = data.get("value", "")
+            else:
+                value = data
+            key_lower = key.lower()
+            val_lower = str(value).lower()
+            if any(
+                word in key_lower or word in val_lower
+                for word in query_words
+            ):
+                direct_matches[key] = value
+
+        if direct_matches:
+            result_lines.append("\n[DIRECT MATCHES]")
+            for k, v in list(direct_matches.items())[:5]:
+                result_lines.append(f"- {k}: {v}")
+                matched_keys.add(k)
+            total_entries += len(direct_matches)
+            has_specific_match = True
+
+    # ── Layer 3: Safety net — 3 most recent memories ─────────────────────────
+    # Fires when neither L1 (beyond preferences) nor L2 found anything.
+    # Ensures the response always has some useful personal context.
+    if not has_specific_match:
+        recent = []
+        for key, data in all_mem.items():
+            if key in matched_keys:
+                continue  # skip already-shown preference entries
+            if isinstance(data, dict):
+                value = data.get("value", "")
+                updated = data.get("updated", "")
+            else:
+                value = data
+                updated = ""
+            recent.append((key, value, updated))
+        recent.sort(key=lambda x: x[2], reverse=True)
+        if recent:
+            result_lines.append("\n[RECENT MEMORIES]")
+            for k, v, _ in recent[:3]:
+                result_lines.append(f"- {k}: {v}")
+            total_entries += min(3, len(recent))
+
+    if not result_lines:
+        return get_core_preferences()
+
+    logger.debug(
+        f"Memory injection: {total_entries} entries "
+        f"(~{total_entries * 15} tokens)"
+    )
+
+    return (
+        "RELEVANT MEMORIES (use these in response):\n" +
+        "\n".join(result_lines)
+    )
 
 def schedule_save(job_id: str, data: dict):
     jobs = _load(SCHEDULE_FILE)
@@ -312,17 +622,26 @@ def ask_claude_with_history(system: str, user_msg: str,
 
 
 def auto_extract_memory(user_id: str, text: str):
-    """Automatically extract and save useful facts from conversation."""
+    """
+    Auto extract and save memories from conversation.
+    Uses categorized storage for better retrieval.
+    """
     system = """Extract personal facts or preferences from this message worth remembering long term.
 Return ONLY valid JSON array:
 [
-  {"key": "chinese_script", "value": "Traditional Chinese", "is_preference": true},
-  {"key": "city", "value": "Kuala Lumpur", "is_preference": false}
+  {
+    "key": "meal_breakfast",
+    "value": "oats and banana at 7am",
+    "is_preference": true,
+    "importance": "high"
+  }
 ]
-is_preference=true for strong preferences (language, format, style rules).
-is_preference=false for facts (city, name, job).
-If nothing to remember return: []
-Only extract clear explicit facts."""
+importance: "high" = must always follow
+            "medium" = helpful context
+            "low" = nice to know
+If nothing worth remembering return: []
+Only extract clear explicit facts.
+Do not extract questions or temporary info."""
     try:
         raw = ask_claude(system, text, max_tokens=300, model=MODEL_FAST)
         raw = raw.strip().strip("```json").strip("```").strip()
@@ -330,66 +649,75 @@ Only extract clear explicit facts."""
         facts = json.loads(raw)
         for fact in facts:
             if "key" in fact and "value" in fact:
-                memory_set(fact["key"], fact["value"])
-                if fact.get("is_preference"):
-                    preference_set(fact["key"], fact["value"])
+                key = fact["key"]
+                value = fact["value"]
+                importance = fact.get("importance", "medium")
+                memory_set_categorized(key, value)
                 logger.info(
-                    f"Auto-extracted: {fact['key']} = {fact['value']} "
-                    f"(pref: {fact.get('is_preference')})"
+                    f"Auto-saved [{importance}]: "
+                    f"{key} = {str(value)[:50]}"
                 )
-    except Exception:
-        pass  # Silent fail — not critical
+    except Exception as e:
+        logger.debug(f"Auto-extract error: {e}")
 
 
 def get_topic_preferences(topic: str) -> str:
     """
-    Get memory preferences relevant to a topic.
-    topic: "weather", "news", "crypto", etc.
-    Returns formatted preference string.
+    Get memories for a specific topic.
+    Enhanced version using categories.
     """
-    all_mem = memory_all()
-    if not all_mem:
-        return ""
-
-    topic_keywords = {
-        "weather": [
-            "weather", "temperature", "temp",
-            "celsius", "fahrenheit", "dew",
-            "wind", "humidity", "rain", "uv",
-            "forecast", "climate",
-        ],
-        "news": [
-            "news", "report", "article",
-            "format", "style", "length",
-        ],
-        "crypto": [
-            "crypto", "bitcoin", "btc", "eth",
-            "price", "coin", "trading",
-        ],
-        "chinese": [
-            "chinese", "mandarin", "cantonese",
-            "traditional", "simplified",
-        ],
+    # Map topic to category
+    topic_to_category = {
+        "weather": "preferences",
+        "news": "preferences",
+        "crypto": "finance",
+        "study": "learning",
+        "meal": "health",
+        "food": "health",
+        "health": "health",
+        "work": "work",
+        "personal": "personal",
+        "travel": "travel",
+        "schedule": "schedule",
+        "finance": "finance",
     }
 
-    keywords = topic_keywords.get(topic, [topic])
+    category = topic_to_category.get(topic.lower(), "preferences")
 
-    relevant = {}
-    for key, value in all_mem.items():
+    # Get category memories
+    cat_memories = memory_get_by_category(category)
+
+    # Also search by keywords
+    all_mem = _load(MEMORY_FILE)
+    topic_keywords = topic.lower().split()
+
+    keyword_memories = {}
+    for key, data in all_mem.items():
+        if isinstance(data, dict):
+            value = data.get("value", "")
+        else:
+            value = data
         key_lower = key.lower()
         val_lower = str(value).lower()
-        if any(kw in key_lower or kw in val_lower
-               for kw in keywords):
-            relevant[key] = value
+        if any(kw in key_lower or kw in val_lower for kw in topic_keywords):
+            keyword_memories[key] = value
 
-    if not relevant:
+    # Merge both
+    combined = {**cat_memories, **keyword_memories}
+
+    if not combined:
         return ""
 
-    lines = [f"Remembered {topic} preferences:"]
-    for k, v in relevant.items():
+    lines = [
+        f"Remembered {topic} preferences "
+        f"(follow exactly):"
+    ]
+    for k, v in combined.items():
         lines.append(f"- {k}: {v}")
-    lines.append("(These must be followed exactly)")
-
+    lines.append(
+        "These are personal preferences. "
+        "Always follow them."
+    )
     return "\n".join(lines)
 
 

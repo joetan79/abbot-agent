@@ -10,7 +10,10 @@
       "Bash(pip show:*)",
       "Bash(ANTHROPIC_API_KEY=test OWNER_CHAT_ID=0 python3 -c \":*)",
       "Bash(ANTHROPIC_API_KEY=test OWNER_CHAT_ID=0 python3 -m py_compile modules/utils.py)",
-      "Bash(crontab:*)"
+      "Bash(crontab:*)",
+      "Bash(ls /home/claudeProj/agentbot/*.env)",
+      "Bash(ls /home/claudeProj/agentbot/.env*)",
+      "Bash(venv/bin/python3:*)"
     ]
   }
 }
