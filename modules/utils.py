@@ -174,7 +174,107 @@ SCHEDULE_FILE     = DATA_DIR / "schedules.json"
 TASKS_FILE        = DATA_DIR / "tasks.json"
 CACHE_FILE              = DATA_DIR / "news_cache.json"
 PUBLISHED_ARTICLES_FILE = DATA_DIR / "published_articles.json"
+TIME_WINDOWS_FILE = DATA_DIR / "time_windows.json"
 DATA_DIR.mkdir(exist_ok=True)
+
+DEFAULT_TIME_WINDOWS = {
+    "meal":       {"hours": 16, "label": "meal"},
+    "food":       {"hours": 16, "label": "meal"},
+    "fasting":    {"hours": 16, "label": "meal"},
+    "breakfast":  {"hours": 16, "label": "meal"},
+    "lunch":      {"hours": 16, "label": "meal"},
+    "dinner":     {"hours": 16, "label": "meal"},
+    "supper":     {"hours": 16, "label": "meal"},
+    "study":      {"hours": 4,  "label": "study"},
+    "homework":   {"hours": 4,  "label": "study"},
+    "learning":   {"hours": 4,  "label": "study"},
+    "revision":   {"hours": 4,  "label": "study"},
+    "exercise":   {"hours": 48, "label": "exercise"},
+    "workout":    {"hours": 48, "label": "exercise"},
+    "gym":        {"hours": 48, "label": "exercise"},
+    "run":        {"hours": 48, "label": "exercise"},
+    "medication": {"hours": 8,  "label": "medication"},
+    "medicine":   {"hours": 8,  "label": "medication"},
+    "pill":       {"hours": 8,  "label": "medication"},
+    "vitamin":    {"hours": 24, "label": "vitamin"},
+    "supplement": {"hours": 24, "label": "vitamin"},
+    "sleep":      {"hours": 16, "label": "sleep"},
+    "nap":        {"hours": 4,  "label": "nap"},
+    "rest":       {"hours": 8,  "label": "rest"},
+    "work":       {"hours": 14, "label": "work"},
+    "prayer":     {"hours": 6,  "label": "prayer"},
+    "water":      {"hours": 2,  "label": "water"},
+    "drink":      {"hours": 2,  "label": "water"},
+    "break":      {"hours": 2,  "label": "break"},
+    "meeting":    {"hours": 24, "label": "meeting"},
+    "reading":    {"hours": 4,  "label": "reading"},
+}
+
+
+def save_time_window(
+        activity: str,
+        hours: float,
+        label: str = "") -> bool:
+    try:
+        windows = _load(TIME_WINDOWS_FILE)
+        key = activity.lower().strip()
+        old_hours = None
+        if key in windows:
+            old_val = windows[key]
+            if isinstance(old_val, dict):
+                old_hours = old_val.get("hours")
+        windows[key] = {
+            "hours": hours,
+            "label": label or key,
+            "updated": datetime.now().isoformat(),
+            "custom": True,
+        }
+        _save(TIME_WINDOWS_FILE, windows)
+        if old_hours and old_hours != hours:
+            logger.info(
+                f"Window updated: "
+                f"{key} {old_hours}hrs→{hours}hrs"
+            )
+        else:
+            logger.info(
+                f"Window saved: {key}={hours}hrs"
+            )
+        return True
+    except Exception as e:
+        logger.error(
+            f"Save time window error: {e}")
+        return False
+
+
+def get_time_window(activity: str) -> dict | None:
+    key = activity.lower().strip()
+    custom = _load(TIME_WINDOWS_FILE)
+    if key in custom:
+        return custom[key]
+    for ckey, cval in custom.items():
+        if ckey in key or key in ckey:
+            return cval
+    if key in DEFAULT_TIME_WINDOWS:
+        return DEFAULT_TIME_WINDOWS[key]
+    for dkey, dval in DEFAULT_TIME_WINDOWS.items():
+        if dkey in key or key in dkey:
+            return dval
+    return None
+
+
+def get_all_time_windows() -> dict:
+    custom = _load(TIME_WINDOWS_FILE)
+    return {**DEFAULT_TIME_WINDOWS, **custom}
+
+
+def delete_time_window(activity: str) -> bool:
+    windows = _load(TIME_WINDOWS_FILE)
+    key = activity.lower().strip()
+    if key in windows:
+        del windows[key]
+        _save(TIME_WINDOWS_FILE, windows)
+        return True
+    return False
 
 def _load(path: Path) -> dict:
     try:

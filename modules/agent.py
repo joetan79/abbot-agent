@@ -195,6 +195,8 @@ IMPORTANT RULES:
   City can follow: "in", "for", "at", or appear after "weather".
   If multiple cities, put the FIRST one in "city".
   If no city mentioned, set "city" to null.
+- If user wants to set/change a time window for an activity → use intent "time_window_set"
+  Extract the activity name into "activity" and hours into "hours".
 
 WEATHER EXAMPLES:
 "weather in Tokyo" → {"intent":"weather","city":"Tokyo","action":"weather"}
@@ -207,9 +209,17 @@ WEATHER EXAMPLES:
 "schedule daily 8am weather in Macau" → {"intent":"schedule_add","time":"08:00","frequency":"daily","action":"weather","city":"Macau"}
 "schedule daily 7am weather" → {"intent":"schedule_add","time":"07:00","frequency":"daily","action":"weather","city":null}
 
+TIME WINDOW EXAMPLES:
+"remember my study window is 4 hours" → {"intent":"time_window_set","activity":"study","hours":4}
+"my fasting window is 16 hours" → {"intent":"time_window_set","activity":"meal","hours":16}
+"exercise window is 48 hours" → {"intent":"time_window_set","activity":"exercise","hours":48}
+"change study to 6 hours" → {"intent":"time_window_set","activity":"study","hours":6}
+"set meal reminder to 12 hours" → {"intent":"time_window_set","activity":"meal","hours":12}
+"medication every 8 hours" → {"intent":"time_window_set","activity":"medication","hours":8}
+
 Return JSON:
 {
-  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, weather, report, chat],
+  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, weather, report, time_window_set, chat],
   "time": "HH:MM" or null,
   "frequency": "daily" or "weekly" or "once" or null,
   "day": day of week or null,
@@ -217,7 +227,9 @@ Return JSON:
   "key": memory key or null,
   "value": memory value or null,
   "task_id": task id or null,
-  "city": city name extracted from message or null
+  "city": city name extracted from message or null,
+  "activity": activity name or null,
+  "hours": number of hours or null
 }
 Return ONLY the JSON object, no markdown, no explanation."""
     raw = ask_claude(system, text, max_tokens=300, model=MODEL_FAST)
@@ -450,10 +462,392 @@ async def run_scheduled_job(bot, job_id: str, action: str):
     except Exception as e:
         logger.error(f"Failed to send scheduled message: {e}")
 
+def detect_activity_completion(
+        text: str) -> dict | None:
+    """
+    Detect if user just finished any activity.
+    English and Chinese only.
+    Uses message timestamp - no time needed in text.
+    """
+    from modules.utils import (
+        ask_claude, MODEL_FAST,
+        get_all_time_windows
+    )
+
+    all_windows = get_all_time_windows()
+    activity_list = ", ".join(
+        sorted(set(
+            v.get("label", k)
+            for k, v in all_windows.items()
+            if isinstance(v, dict)
+        ))
+    )
+
+    system = f"""Detect if user just finished/completed
+an activity. Known activities: {activity_list}
+
+LANGUAGE: Support English and Chinese only.
+
+Return ONLY valid JSON:
+{{
+  "is_completion": true/false,
+  "activity": "activity name",
+  "activity_key": "key matching known activities",
+  "confidence": "high/medium/low",
+  "language": "english/chinese"
+}}
+
+English completion examples:
+"finished dinner" → true, dinner, meal, high
+"done studying" → true, studying, study, high
+"finished my workout" → true, workout, exercise, high
+"took my medication" → true, medication, medication, high
+"just woke up" → true, sleep, sleep, high
+"done eating" → true, meal, meal, high
+"just had breakfast" → true, breakfast, meal, high
+"finished lunch" → true, lunch, meal, high
+"done with work" → true, work, work, high
+"finished reading" → true, reading, reading, high
+"had my vitamins" → true, vitamin, vitamin, high
+"drank water" → true, water, water, high
+"done with meeting" → true, meeting, meeting, high
+
+Chinese completion examples:
+"吃完了" → true, 吃饭, meal, high
+"飯吃完了" → true, 吃饭, meal, high
+"用餐完畢" → true, 用餐, meal, high
+"剛吃完" → true, 吃饭, meal, high
+"吃早餐完了" → true, 早餐, meal, high
+"午飯吃完" → true, 午饭, meal, high
+"晚飯吃完了" → true, 晚饭, meal, high
+"溫習完了" → true, 温习, study, high
+"讀書完了" → true, 读书, study, high
+"做完功課了" → true, 功课, study, high
+"運動完了" → true, 运动, exercise, high
+"健身完了" → true, 健身, exercise, high
+"吃藥了" → true, 药, medication, high
+"剛睡醒" → true, 睡觉, sleep, high
+"睡醒了" → true, 睡觉, sleep, high
+"下班了" → true, 工作, work, high
+"喝水了" → true, 水, water, high
+
+NOT completions:
+"I am hungry" → false
+"what should I eat?" → false
+"remind me later" → false
+"what time is it?" → false
+"I want to exercise" → false
+"schedule dinner" → false
+"我想吃飯" → false (want to eat, not done)
+"我餓了" → false (hungry, not done)
+
+Return ONLY the JSON, no explanation."""
+
+    try:
+        raw = ask_claude(
+            system, text,
+            max_tokens=150,
+            model=MODEL_FAST
+        )
+        raw = raw.strip()\
+                 .strip("```json")\
+                 .strip("```")\
+                 .strip()
+        result = json.loads(raw)
+        if result.get("is_completion") and \
+           result.get("confidence") in \
+           ["high", "medium"]:
+            return result
+        return None
+    except Exception as e:
+        logger.debug(
+            f"Activity detect error: {e}")
+        return None
+
+
+async def handle_activity_reminder(
+        update,
+        context,
+        activity_info: dict):
+    """
+    Set one-time reminder for ANY activity.
+    Uses exact Telegram message timestamp.
+    Auto-detects window from saved preferences.
+    """
+    from modules.reminders import (
+        save_reminder,
+        delete_reminders_by_type,
+    )
+    from modules.utils import (
+        memory_get,
+        memory_set,
+        get_time_window,
+    )
+    from datetime import datetime, timezone, timedelta
+
+    MYT = timedelta(hours=8)
+
+    # Use exact Telegram message timestamp
+    msg_timestamp = update.message.date
+    if msg_timestamp.tzinfo is None:
+        msg_timestamp = msg_timestamp.replace(
+            tzinfo=timezone.utc)
+
+    activity_dt = msg_timestamp
+    activity_local = activity_dt + MYT
+    now = datetime.now(timezone.utc)
+
+    activity = activity_info.get(
+        "activity", "activity")
+    activity_key = activity_info.get(
+        "activity_key", activity)
+
+    # Get time window
+    window = get_time_window(activity_key)
+    if window:
+        hours = window.get("hours", 4)
+        window_label = window.get(
+            "label", activity_key)
+    else:
+        hours = 4
+        window_label = activity_key
+        logger.info(
+            f"Unknown activity '{activity_key}'"
+            f" using default 4hrs"
+        )
+
+    # Smart display name for meals
+    display_activity = activity
+    if activity_key in [
+            "meal", "food", "fasting",
+            "breakfast", "lunch", "dinner",
+            "supper"]:
+        hour = activity_local.hour
+        if 5 <= hour < 11:
+            display_activity = "breakfast"
+        elif 11 <= hour < 15:
+            display_activity = "lunch"
+        elif 15 <= hour < 18:
+            display_activity = "tea/snack"
+        elif 18 <= hour < 22:
+            display_activity = "dinner"
+        else:
+            display_activity = "supper"
+
+    # Calculate reminder time
+    reminder_dt = activity_dt + timedelta(
+        hours=hours)
+
+    if reminder_dt <= now:
+        reminder_dt = now + timedelta(hours=hours)
+        activity_dt = now
+        activity_local = activity_dt + MYT
+
+    reminder_local = reminder_dt + MYT
+
+    # Delete existing same-type reminder
+    deleted = delete_reminders_by_type(
+        activity_key)
+    if deleted > 0:
+        logger.info(
+            f"Replaced {deleted} existing "
+            f"{activity_key} reminder"
+        )
+
+    # Save to memory
+    memory_set(
+        f"last_{activity_key}_time",
+        activity_local.strftime(
+            "%d %b %Y %H:%M MYT")
+    )
+
+    reminder_id = (
+        f"{activity_key}_{int(now.timestamp())}"
+    )
+
+    # Activity-specific reminder messages
+    activity_messages = {
+        "meal": (
+            f"It has been {hours} hours since "
+            f"your last {display_activity}.\n"
+            f"Time to eat!"
+        ),
+        "study": (
+            f"It has been {hours} hours since "
+            f"your last study session.\n"
+            f"Time to study!"
+        ),
+        "exercise": (
+            f"It has been {hours} hours since "
+            f"your last workout.\n"
+            f"Time to exercise!"
+        ),
+        "medication": (
+            f"It has been {hours} hours since "
+            f"your last medication.\n"
+            f"Time to take your medication!"
+        ),
+        "sleep": (
+            f"You have been awake for "
+            f"{hours} hours.\n"
+            f"Consider getting some rest."
+        ),
+        "prayer": (
+            f"It has been {hours} hours since "
+            f"your last prayer.\n"
+            f"Prayer time!"
+        ),
+        "water": (
+            f"It has been {hours} hours.\n"
+            f"Time to drink water!"
+        ),
+        "work": (
+            f"It has been {hours} hours since "
+            f"you finished work.\n"
+            f"Time to start work!"
+        ),
+        "vitamin": (
+            f"It has been {hours} hours since "
+            f"your last supplement.\n"
+            f"Time for your vitamins!"
+        ),
+        "reading": (
+            f"It has been {hours} hours since "
+            f"your last reading session.\n"
+            f"Time to read!"
+        ),
+    }
+
+    activity_msg = activity_messages.get(
+        activity_key,
+        f"It has been {hours} hours since "
+        f"your last {display_activity}.\n"
+        f"Time for {display_activity}!"
+    )
+
+    reminder_msg = (
+        f"{display_activity.title()} Reminder\n\n"
+        f"{activity_msg}\n\n"
+        f"Last {display_activity}: "
+        f"{activity_local.strftime('%d %b %H:%M MYT')}"
+        f"\n\nTell me when you finish your next "
+        f"{display_activity} to reset the timer!"
+    )
+
+    save_reminder(
+        reminder_id=reminder_id,
+        chat_id=update.effective_chat.id,
+        message=reminder_msg,
+        fire_at=reminder_dt,
+        reminder_type=activity_key,
+        auto_delete=True,
+    )
+
+    scheduler = context.application.bot_data.get(
+        "scheduler")
+    if scheduler:
+        scheduler.add_job(
+            fire_reminder,
+            "date",
+            run_date=reminder_dt,
+            args=[
+                context.bot,
+                reminder_id,
+                update.effective_chat.id,
+                reminder_msg,
+            ],
+            id=reminder_id,
+            replace_existing=True,
+        )
+
+    diff = reminder_dt - now
+    hours_until = diff.total_seconds() / 3600
+    if hours_until < 1:
+        time_until = (
+            f"{int(hours_until*60)} minutes"
+        )
+    elif hours_until < 24:
+        time_until = f"{hours_until:.1f} hours"
+    else:
+        days = hours_until / 24
+        time_until = f"{days:.1f} days"
+
+    emoji_map = {
+        "meal": "🍽️", "study": "📚",
+        "exercise": "💪", "medication": "💊",
+        "sleep": "😴", "prayer": "🙏",
+        "water": "💧", "work": "💼",
+        "vitamin": "💊", "break": "☕",
+        "reading": "📖", "meeting": "🤝",
+    }
+    emoji = emoji_map.get(activity_key, "⏰")
+
+    await update.message.reply_text(
+        f"{emoji} {display_activity.title()} "
+        f"recorded!\n\n"
+        f"Completed: "
+        f"{activity_local.strftime('%d %b %Y %H:%M')} "
+        f"MYT\n"
+        f"Next reminder: "
+        f"{reminder_local.strftime('%d %b %Y %H:%M')} "
+        f"MYT\n"
+        f"Window: {hours} hours\n"
+        f"Reminder in: {time_until}\n\n"
+        f"I will remind you automatically!\n"
+        f"Just tell me when you complete "
+        f"your next {display_activity}."
+    )
+
+
+async def fire_reminder(
+        bot,
+        reminder_id: str,
+        chat_id: int,
+        message: str):
+    """Fire reminder and auto-delete."""
+    from modules.reminders import (
+        _load_reminders,
+        delete_reminder,
+    )
+    try:
+        reminders = _load_reminders()
+        reminder = reminders.get(reminder_id)
+        if not reminder:
+            logger.warning(
+                f"Reminder {reminder_id} not found"
+            )
+            return
+        await bot.send_message(
+            chat_id=chat_id,
+            text=message
+        )
+        logger.info(
+            f"Fired reminder: {reminder_id}")
+        if reminder.get("auto_delete", True):
+            delete_reminder(reminder_id)
+            logger.info(
+                f"Auto-deleted: {reminder_id}")
+    except Exception as e:
+        logger.error(
+            f"Fire reminder error "
+            f"{reminder_id}: {e}"
+        )
+
+
 async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Use full_context if available (includes quoted message)
     text = context.user_data.pop("full_context", None) \
            or update.message.text or ""
+
+    # ── ACTIVITY COMPLETION DETECTION ─────────
+    activity_info = detect_activity_completion(text)
+    if activity_info:
+        await handle_activity_reminder(
+            update, context, activity_info)
+        return
+    # ──────────────────────────────────────────
+
+    # Continue with intent parsing...
     intent_data = parse_intent(text)
     intent = intent_data.get("intent", "chat")
     logger.info(f"DEBUG intent: {intent} | data: {intent_data}")
@@ -610,6 +1004,131 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         for k, v in mem.items():
             lines.append(f"• *{k}*: {v}")
         await update.message.reply_text("\n".join(lines), parse_mode=None)
+
+    elif intent == "time_window_set":
+        from modules.utils import save_time_window
+        from modules.reminders import (
+            get_reminders_by_type,
+            save_reminder,
+            delete_reminders_by_type,
+        )
+        from datetime import (
+            datetime, timezone, timedelta)
+        import re as _re
+
+        activity = intent_data.get("activity", "")
+        hours = intent_data.get("hours", 0)
+
+        if not hours:
+            m = _re.search(
+                r'(\d+(?:\.\d+)?)\s*hours?',
+                text.lower())
+            if m:
+                hours = float(m.group(1))
+
+        if activity and hours:
+            save_time_window(
+                activity, hours, activity)
+
+            # Reschedule any existing reminder
+            existing = get_reminders_by_type(
+                activity.lower())
+            rescheduled = False
+
+            if existing:
+                now = datetime.now(timezone.utc)
+                for rid, reminder in \
+                        existing.items():
+                    try:
+                        created_at = reminder.get(
+                            "created_at", "")
+                        if not created_at:
+                            continue
+                        created_dt = \
+                            datetime.fromisoformat(
+                                created_at)
+                        if created_dt.tzinfo is None:
+                            created_dt = \
+                                created_dt.replace(
+                                tzinfo=timezone.utc)
+                        new_fire = created_dt + \
+                            timedelta(hours=hours)
+                        if new_fire > now:
+                            delete_reminders_by_type(
+                                activity.lower())
+                            save_reminder(
+                                reminder_id=rid,
+                                chat_id=reminder.get(
+                                    "chat_id", 0),
+                                message=reminder.get(
+                                    "message", ""),
+                                fire_at=new_fire,
+                                reminder_type=\
+                                    activity.lower(),
+                                auto_delete=True,
+                            )
+                            scheduler = \
+                                context.application\
+                                .bot_data.get(
+                                "scheduler")
+                            if scheduler:
+                                try:
+                                    scheduler\
+                                        .remove_job(rid)
+                                except Exception:
+                                    pass
+                                scheduler.add_job(
+                                    fire_reminder,
+                                    "date",
+                                    run_date=new_fire,
+                                    args=[
+                                        context.bot,
+                                        rid,
+                                        reminder.get(
+                                            "chat_id", 0),
+                                        reminder.get(
+                                            "message", ""),
+                                    ],
+                                    id=rid,
+                                    replace_existing=True,
+                                )
+                            rescheduled = True
+                    except Exception as e:
+                        logger.error(
+                            f"Reschedule error: {e}")
+
+            emoji_map = {
+                "study": "📚", "exercise": "💪",
+                "meal": "🍽️", "medication": "💊",
+                "sleep": "😴", "prayer": "🙏",
+                "water": "💧", "work": "💼",
+                "vitamin": "💊", "reading": "📖",
+            }
+            emoji = emoji_map.get(
+                activity.lower(), "⏰")
+
+            msg = (
+                f"{emoji} Window saved!\n\n"
+                f"Activity: {activity}\n"
+                f"Window: {hours} hours\n"
+            )
+            if rescheduled:
+                msg += (
+                    "\nExisting reminder also "
+                    "rescheduled to new window!"
+                )
+            msg += (
+                f"\n\nJust tell me when you "
+                f"finish {activity} and I will "
+                f"remind you in {hours} hours."
+            )
+            await update.message.reply_text(msg)
+        else:
+            await update.message.reply_text(
+                "Please specify activity and hours.\n"
+                "Example:\n"
+                "Remember my study window is 4 hours"
+            )
 
     elif intent == "news":
         await update.message.chat.send_action("typing")

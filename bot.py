@@ -2,6 +2,7 @@
 """AgentBot — ABbot Professional AI Agent"""
 
 import os, logging, asyncio
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -138,6 +139,64 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ask_claude_with_history(system, full_context, user_id, model=MODEL_SMART)
     )
 
+def restore_reminders(scheduler, bot):
+    from modules.reminders import (
+        _load_reminders, delete_reminder)
+    from modules.agent import fire_reminder
+    reminders = _load_reminders()
+    now = datetime.now(timezone.utc)
+    restored = 0
+    expired = 0
+    for rid, reminder in reminders.items():
+        try:
+            fire_at_str = reminder.get(
+                "fire_at", "")
+            if not fire_at_str:
+                continue
+            fire_at = datetime.fromisoformat(
+                fire_at_str)
+            if fire_at.tzinfo is None:
+                fire_at = fire_at.replace(
+                    tzinfo=timezone.utc)
+            chat_id = reminder.get("chat_id")
+            message = reminder.get("message", "")
+            if fire_at <= now:
+                if fire_at >= now - timedelta(
+                        hours=2):
+                    scheduler.add_job(
+                        fire_reminder,
+                        "date",
+                        run_date=now + timedelta(
+                            seconds=10),
+                        args=[bot, rid,
+                              chat_id,
+                              f"(Delayed) {message}"],
+                        id=f"delayed_{rid}",
+                        replace_existing=True,
+                    )
+                else:
+                    delete_reminder(rid)
+                    expired += 1
+            else:
+                scheduler.add_job(
+                    fire_reminder,
+                    "date",
+                    run_date=fire_at,
+                    args=[bot, rid,
+                          chat_id, message],
+                    id=rid,
+                    replace_existing=True,
+                )
+                restored += 1
+        except Exception as e:
+            logger.error(
+                f"Restore reminder error "
+                f"{rid}: {e}")
+    logger.info(
+        f"Reminders restored={restored} "
+        f"expired={expired}")
+
+
 def restore_schedules(scheduler, bot):
     jobs = schedule_load_all()
     for job_id, j in jobs.items():
@@ -241,11 +300,162 @@ async def cmd_newsstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"(Articles already sent won't repeat)"
     )
 
+
+async def cmd_reminders(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_chat.id):
+        return
+    from modules.reminders import get_all_reminders
+    reminders = get_all_reminders()
+    if not reminders:
+        await update.message.reply_text(
+            "No pending reminders.\n\n"
+            "Tell me when you finish any activity\n"
+            "and I will set a reminder automatically!"
+        )
+        return
+    now = datetime.now(timezone.utc)
+    MYT = timedelta(hours=8)
+    lines = [
+        f"Pending Reminders ({len(reminders)})\n"
+    ]
+    for rid, r in reminders.items():
+        try:
+            fire_at = datetime.fromisoformat(
+                r.get("fire_at", ""))
+            if fire_at.tzinfo is None:
+                fire_at = fire_at.replace(
+                    tzinfo=timezone.utc)
+            fire_local = fire_at + MYT
+            diff = fire_at - now
+            if diff.total_seconds() > 0:
+                hrs = diff.total_seconds() / 3600
+                if hrs < 1:
+                    tl = f"{int(hrs*60)}min"
+                elif hrs < 24:
+                    tl = f"{hrs:.1f}hrs"
+                else:
+                    tl = f"{hrs/24:.1f}days"
+                status = f"in {tl}"
+            else:
+                status = "firing soon"
+            rtype = r.get("type", "general")
+            preview = r.get("message", "")[:50]
+            lines.append(
+                f"• [{rtype}] "
+                f"{fire_local.strftime('%d %b %H:%M')} "
+                f"MYT ({status})\n"
+                f"  {preview}...\n"
+                f"  ID: {rid}"
+            )
+        except Exception:
+            lines.append(f"• {rid}: (error)")
+    lines.append(
+        "\nUse /cancelreminder <id> to cancel."
+    )
+    await update.message.reply_text(
+        "\n".join(lines))
+
+
+async def cmd_cancel_reminder(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_chat.id):
+        return
+    rid = " ".join(context.args).strip()
+    if not rid:
+        await update.message.reply_text(
+            "Usage: /cancelreminder <id>\n"
+            "Use /reminders to see IDs."
+        )
+        return
+    from modules.reminders import delete_reminder
+    scheduler = context.application.bot_data.get(
+        "scheduler")
+    if scheduler:
+        try:
+            scheduler.remove_job(rid)
+        except Exception:
+            pass
+    if delete_reminder(rid):
+        await update.message.reply_text(
+            f"Reminder cancelled: {rid}")
+    else:
+        await update.message.reply_text(
+            f"Reminder not found: {rid}")
+
+
+async def cmd_windows(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_chat.id):
+        return
+    from modules.utils import (
+        get_all_time_windows,
+        _load,
+        TIME_WINDOWS_FILE,
+        DEFAULT_TIME_WINDOWS,
+    )
+    custom = _load(TIME_WINDOWS_FILE)
+    emoji_map = {
+        "meal": "🍽️", "food": "🍽️",
+        "breakfast": "🍽️", "lunch": "🍽️",
+        "dinner": "🍽️", "supper": "🍽️",
+        "study": "📚", "homework": "📚",
+        "learning": "📚", "revision": "📚",
+        "exercise": "💪", "workout": "💪",
+        "gym": "💪", "run": "💪",
+        "medication": "💊", "medicine": "💊",
+        "pill": "💊", "vitamin": "💊",
+        "supplement": "💊",
+        "sleep": "😴", "nap": "😴", "rest": "😴",
+        "prayer": "🙏",
+        "water": "💧", "drink": "💧",
+        "work": "💼", "meeting": "🤝",
+        "reading": "📖", "break": "☕",
+    }
+    lines = ["Time Windows\n"]
+    if custom:
+        lines.append("Your Custom Windows:")
+        for key, val in custom.items():
+            if isinstance(val, dict):
+                hours = val.get("hours", 0)
+                emoji = emoji_map.get(key, "⏰")
+                lines.append(
+                    f"  {emoji} {key}: "
+                    f"{hours} hours"
+                )
+        lines.append("")
+    lines.append("Default Windows:")
+    shown = set()
+    for key, val in DEFAULT_TIME_WINDOWS.items():
+        if isinstance(val, dict):
+            label = val.get("label", key)
+            if label not in shown:
+                hours = val.get("hours", 0)
+                emoji = emoji_map.get(key, "⏰")
+                lines.append(
+                    f"  {emoji} {label}: "
+                    f"{hours} hours"
+                )
+                shown.add(label)
+    lines.append(
+        "\nTo set custom window:\n"
+        "Remember my [activity] window "
+        "is [X] hours\n\n"
+        "Example:\n"
+        "Remember my study window is 4 hours"
+    )
+    await update.message.reply_text(
+        "\n".join(lines))
+
 async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     scheduler = AsyncIOScheduler()
     app.bot_data["scheduler"] = scheduler
     restore_schedules(scheduler, app.bot)
+    restore_reminders(scheduler, app.bot)
     scheduler.start()
     logger.info("⏰ Scheduler started")
     app.add_handler(CommandHandler("start",     cmd_start))
@@ -264,21 +474,27 @@ async def main():
     app.add_handler(CommandHandler("clear",      cmd_clear_history))
     app.add_handler(CommandHandler("newsstatus", cmd_newsstatus))
     app.add_handler(CommandHandler("feedhealth", cmd_feedhealth))
-    app.add_handler(CommandHandler("memories",   cmd_memories))
-    app.add_handler(CommandHandler("forget",     cmd_forget))
+    app.add_handler(CommandHandler("memories",       cmd_memories))
+    app.add_handler(CommandHandler("forget",         cmd_forget))
+    app.add_handler(CommandHandler("reminders",      cmd_reminders))
+    app.add_handler(CommandHandler("cancelreminder", cmd_cancel_reminder))
+    app.add_handler(CommandHandler("windows",        cmd_windows))
     await app.bot.set_my_commands([
-        BotCommand("start",     "Welcome & help"),
-        BotCommand("tasks",     "View pending tasks"),
-        BotCommand("schedules", "View active schedules"),
-        BotCommand("memory",    "View bot memory"),
-        BotCommand("news",      "Top AI & Tech news"),
-        BotCommand("report",    "Daily report now"),
-        BotCommand("skills",    "View loaded AI skills"),
-        BotCommand("newsstatus","News tracking stats"),
-        BotCommand("feedhealth","Check RSS feed health"),
-        BotCommand("memories",  "View all stored memories"),
-        BotCommand("forget",    "Delete a memory entry"),
-        BotCommand("clear",     "Clear conversation history"),
+        BotCommand("start",          "Welcome & help"),
+        BotCommand("tasks",          "View pending tasks"),
+        BotCommand("schedules",      "View active schedules"),
+        BotCommand("memory",         "View bot memory"),
+        BotCommand("news",           "Top AI & Tech news"),
+        BotCommand("report",         "Daily report now"),
+        BotCommand("skills",         "View loaded AI skills"),
+        BotCommand("newsstatus",     "News tracking stats"),
+        BotCommand("feedhealth",     "Check RSS feed health"),
+        BotCommand("memories",       "View all stored memories"),
+        BotCommand("forget",         "Delete a memory entry"),
+        BotCommand("clear",          "Clear conversation history"),
+        BotCommand("reminders",      "View pending reminders"),
+        BotCommand("cancelreminder", "Cancel a reminder"),
+        BotCommand("windows",        "View time windows"),
     ])
     logger.info("🤖 AgentBot is running...")
     await app.run_polling(allowed_updates=Update.ALL_TYPES)
