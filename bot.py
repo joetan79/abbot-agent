@@ -33,6 +33,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
+# Deduplication: track processed update IDs to skip Telegram retries
+_processed_updates: set = set()
+_MAX_PROCESSED = 1000
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return
     if is_owner(update.effective_chat.id):
@@ -70,6 +74,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode=None)
 
 async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _processed_updates
+
+    # Deduplicate Telegram retries
+    update_id = update.update_id
+    if update_id in _processed_updates:
+        logger.debug(f"Duplicate update {update_id}, skipping")
+        return
+    _processed_updates.add(update_id)
+    if len(_processed_updates) > _MAX_PROCESSED:
+        oldest = sorted(_processed_updates)
+        _processed_updates = set(oldest[-500:])
+
     if not update.message or not update.message.text:
         return
     chat_id = update.effective_chat.id
@@ -92,11 +108,17 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Extract the user's message text
-    text = (msg.text or "").replace(
-        f"@{context.bot.username}", ""
-    ).strip()
+    text = (msg.text or "").strip()
+    if context.bot.username:
+        text = text.replace(f"@{context.bot.username}", "").strip()
     if not text:
         return
+
+    logger.info(
+        f"Message from "
+        f"{update.effective_user.username}: "
+        f"{text[:50]}"
+    )
 
     # Extract quoted/replied message content
     quoted_text = ""
@@ -117,27 +139,36 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         full_context = text
 
-    if is_private and is_owner(chat_id):
-        # Store quoted context for handler to use
-        context.user_data["full_context"] = full_context
-        await handle_owner_message(update, context)
-        return
+    try:
+        if is_private and is_owner(chat_id):
+            # Store quoted context for handler to use
+            context.user_data["full_context"] = full_context
+            await handle_owner_message(update, context)
+            return
 
-    username = update.effective_user.username or ""
-    user_id = str(update.effective_user.id)
-    from modules.study import _get_user_context
-    ctx = _get_user_context(username)
-    prefs = get_preferences_prompt()
-    system = (
-        f"{ctx}\n{prefs}\n"
-        "Be friendly and encouraging. "
-        "If the user is replying to a previous message, "
-        "use that context to give a relevant answer."
-    )
-    await msg.chat.send_action("typing")
-    await msg.reply_text(
-        ask_claude_with_history(system, full_context, user_id, model=MODEL_SMART)
-    )
+        username = update.effective_user.username or ""
+        user_id = str(update.effective_user.id)
+        from modules.study import _get_user_context
+        ctx = _get_user_context(username)
+        prefs = get_preferences_prompt()
+        system = (
+            f"{ctx}\n{prefs}\n"
+            "Be friendly and encouraging. "
+            "If the user is replying to a previous message, "
+            "use that context to give a relevant answer."
+        )
+        await msg.chat.send_action("typing")
+        await msg.reply_text(
+            ask_claude_with_history(system, full_context, user_id, model=MODEL_SMART)
+        )
+    except Exception as e:
+        logger.error(f"route_message error: {e}")
+        try:
+            await msg.reply_text(
+                "Sorry, I had trouble with that. Please try again."
+            )
+        except Exception:
+            pass
 
 def restore_reminders(scheduler, bot):
     from modules.reminders import (
@@ -450,6 +481,22 @@ async def cmd_windows(
     await update.message.reply_text(
         "\n".join(lines))
 
+async def error_handler(
+        update: object,
+        context: ContextTypes.DEFAULT_TYPE):
+    logger.error(
+        f"Update caused error: {context.error}",
+        exc_info=context.error,
+    )
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "Sorry, something went wrong. Please try again."
+            )
+        except Exception:
+            pass
+
+
 async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     scheduler = AsyncIOScheduler()
@@ -479,6 +526,7 @@ async def main():
     app.add_handler(CommandHandler("reminders",      cmd_reminders))
     app.add_handler(CommandHandler("cancelreminder", cmd_cancel_reminder))
     app.add_handler(CommandHandler("windows",        cmd_windows))
+    app.add_error_handler(error_handler)
     await app.bot.set_my_commands([
         BotCommand("start",          "Welcome & help"),
         BotCommand("tasks",          "View pending tasks"),

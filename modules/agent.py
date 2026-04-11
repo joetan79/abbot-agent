@@ -3,7 +3,7 @@
 import re
 import sys
 import json, logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from telegram import Update
 from telegram.ext import ContextTypes
 from .utils import (
@@ -60,6 +60,13 @@ ACTIVE SCHEDULES:
 
 RECENT CONVERSATION:
 {recent_history}
+
+LANGUAGE SUPPORT:
+- Respond in the same language the user writes in
+- If user writes in Chinese: respond in Traditional Chinese
+- If user writes in English: respond in English
+- Never mix languages in one response unless asked
+- For Chinese: always use Traditional Chinese characters
 
 RULES:
 - Use relevant memories to personalize responses
@@ -184,6 +191,8 @@ def parse_news_articles(msg: str, time_period: str = "24 hours") -> list:
 def parse_intent(text: str) -> dict:
     system = """You are an intent parser for a personal AI agent Telegram bot.
 Parse the user message carefully and return ONLY valid JSON.
+You support English and Chinese (Traditional and Simplified) input.
+Parse the intent regardless of which language is used.
 
 IMPORTANT RULES:
 - If user is asking a QUESTION about schedules (e.g. "what will you send me", "summarize my schedules", "what have I scheduled") → use intent "schedule_summary"
@@ -216,6 +225,20 @@ TIME WINDOW EXAMPLES:
 "change study to 6 hours" → {"intent":"time_window_set","activity":"study","hours":6}
 "set meal reminder to 12 hours" → {"intent":"time_window_set","activity":"meal","hours":12}
 "medication every 8 hours" → {"intent":"time_window_set","activity":"medication","hours":8}
+
+CHINESE EXAMPLES (Traditional and Simplified):
+"天气怎么样" → {"intent":"weather","city":null,"action":"weather"}
+"帮我查比特币价格" → {"intent":"chat","action":"帮我查比特币价格"}
+"最新AI新闻" → {"intent":"news","action":"最新AI新闻"}
+"我的任务" → {"intent":"task_list","action":"task_list"}
+"記住我的城市是吉隆坡" → {"intent":"memory_set","key":"city","value":"吉隆坡","action":"memory_set"}
+"今天有什么安排" → {"intent":"schedule_list","action":"schedule_list"}
+"添加任务：买菜" → {"intent":"task_add","action":"买菜"}
+"記住天氣要攝氏" → {"intent":"memory_set","key":"temperature_unit","value":"Celsius","action":"memory_set"}
+"幫我查天氣" → {"intent":"weather","city":null,"action":"weather"}
+"新聞" → {"intent":"news","action":"news"}
+"KL天气" → {"intent":"weather","city":"KL","action":"weather"}
+"吉隆坡天气怎么样" → {"intent":"weather","city":"吉隆坡","action":"weather"}
 
 Return JSON:
 {
@@ -474,6 +497,34 @@ def detect_activity_completion(
         get_all_time_windows
     )
 
+    # ── Quick pre-filter: avoid unnecessary API calls ──────────────────────
+    text_lower = text.lower().strip()
+
+    # Reject: questions and requests should never be activity completions
+    question_indicators = [
+        "?", "what", "how", "when", "where",
+        "why", "who", "which", "can you",
+        "please", "could", "would", "should",
+        "help", "tell me", "show me",
+        "什么", "怎么", "何时", "哪里",
+        "为什么", "谁", "请", "帮我",
+    ]
+    if any(qi in text_lower for qi in question_indicators):
+        return None
+
+    # Accept only if an obvious completion keyword is present
+    completion_triggers = [
+        "done", "finished", "complete", "completed",
+        "took my", "had my", "just had", "just finished",
+        "just woke", "woke up", "done with", "all done",
+        "吃完", "完了", "做完", "运动完",
+        "温习完", "溫習完", "睡醒",
+        "下班", "吃药", "吃藥", "喝水",
+    ]
+    if not any(ct in text_lower for ct in completion_triggers):
+        return None
+    # ──────────────────────────────────────────────────────────────────────
+
     all_windows = get_all_time_windows()
     activity_list = ", ".join(
         sorted(set(
@@ -583,7 +634,6 @@ async def handle_activity_reminder(
         memory_set,
         get_time_window,
     )
-    from datetime import datetime, timezone, timedelta
 
     MYT = timedelta(hours=8)
 
@@ -1012,8 +1062,6 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             save_reminder,
             delete_reminders_by_type,
         )
-        from datetime import (
-            datetime, timezone, timedelta)
         import re as _re
 
         activity = intent_data.get("activity", "")

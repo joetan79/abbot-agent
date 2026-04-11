@@ -1,6 +1,6 @@
 """Shared helpers: Claude API, auth, persistent memory, tasks, schedules."""
 
-import os, json, re, logging
+import os, json, re, logging, time
 from datetime import datetime
 from pathlib import Path
 import anthropic
@@ -140,21 +140,40 @@ def clean_response(text: str) -> str:
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 def ask_claude(system: str, user_msg: str, max_tokens: int = 1500,
-               model: str = None) -> str:
+               model: str = None, max_retries: int = 2) -> str:
     if model is None:
         model = MODEL_FAST
     logger.info(f"Using model: {model} | task: {user_msg[:50]}")
-    try:
-        r = claude.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user_msg}],
-        )
-        return r.content[0].text
-    except Exception as e:
-        logger.error(f"Claude error ({model}): {e}")
-        return "⚠️ Couldn't reach Claude. Please try again."
+    for attempt in range(max_retries + 1):
+        try:
+            r = claude.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user_msg}],
+                timeout=30.0,
+            )
+            return r.content[0].text
+        except anthropic.APITimeoutError:
+            logger.warning(
+                f"Claude timeout attempt {attempt+1}/{max_retries+1}")
+            if attempt < max_retries:
+                time.sleep(2)
+                continue
+            return "Sorry, response timed out. Please try again."
+        except anthropic.RateLimitError:
+            logger.warning("Rate limit hit")
+            if attempt < max_retries:
+                time.sleep(5)
+                continue
+            return "Too many requests. Please wait a moment and try again."
+        except Exception as e:
+            logger.error(f"Claude error ({model}): {e}")
+            if attempt < max_retries:
+                time.sleep(1)
+                continue
+            return "Sorry, I had trouble responding. Please try again."
+    return "Sorry, please try again."
 
 ALLOWED_CHAT_IDS = set(
     int(x) for x in os.environ.get("ALLOWED_CHAT_IDS", "").split(",") if x.strip()
@@ -699,26 +718,40 @@ def history_summary(user_id: str) -> str:
 
 def ask_claude_with_history(system: str, user_msg: str,
                              user_id: str, max_tokens: int = 1500,
-                             model: str = None) -> str:
+                             model: str = None,
+                             max_retries: int = 2) -> str:
     """Send message to Claude with full conversation history for context."""
     if model is None:
         model = MODEL_SMART
-    try:
-        history = history_get(user_id, limit=20)
-        messages = history + [{"role": "user", "content": user_msg}]
-        r = claude.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=messages,
-        )
-        response_text = r.content[0].text
-        history_add(user_id, "user", user_msg)
-        history_add(user_id, "assistant", response_text)
-        return response_text
-    except Exception as e:
-        logger.error(f"Claude history error ({model}): {e}")
-        return "Sorry, I could not process that. Please try again."
+    for attempt in range(max_retries + 1):
+        try:
+            history = history_get(user_id, limit=20)
+            messages = history + [{"role": "user", "content": user_msg}]
+            r = claude.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=messages,
+                timeout=30.0,
+            )
+            response_text = r.content[0].text
+            history_add(user_id, "user", user_msg)
+            history_add(user_id, "assistant", response_text)
+            return response_text
+        except anthropic.APITimeoutError:
+            logger.warning(f"History timeout attempt {attempt+1}")
+            if attempt < max_retries:
+                time.sleep(2)
+                continue
+            logger.info("Falling back to no-history call")
+            return ask_claude(system, user_msg, max_tokens, model)
+        except Exception as e:
+            logger.error(f"Claude history error ({model}): {e}")
+            if attempt < max_retries:
+                time.sleep(1)
+                continue
+            return ask_claude(system, user_msg, max_tokens, model)
+    return "Sorry, please try again."
 
 
 def auto_extract_memory(user_id: str, text: str):
