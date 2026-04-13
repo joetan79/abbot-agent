@@ -1,3 +1,8 @@
+# Master/sensitive docs
+ABBOT_MASTER.md
+AINEWS_MASTER.md
+*_MASTER.md
+
 # Secrets
 .env
 .env.*
