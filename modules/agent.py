@@ -292,44 +292,85 @@ async def run_scheduled_job(bot, job_id: str, action: str):
     city = memory_get(f"city_{job_id}", None) or memory_get("city", "Kuala Lumpur")
     now  = datetime.now().strftime("%A, %d %B %Y %H:%M")
 
-    if action == "weather":
-        # Get city from job-specific memory or fall back to default memory city
-        city = (
-            memory_get(f"city_{job_id}", None) or
-            memory_get("city", "Kuala Lumpur")
-        )
+    if (action == "weather" or
+            "weather" in action.lower() or
+            "temp" in action.lower() or
+            "forecast" in action.lower() or
+            "climate" in action.lower()):
+        # Get city: job-specific memory → extract from action string → default memory
+        city = memory_get(f"city_{job_id}", None)
+        if not city:
+            city_match = re.search(
+                r'(?:for|in|at)\s+([A-Za-z\u4e00-\u9fff][A-Za-z\u4e00-\u9fff\s]*?)(?:\s*[\(\,]|$)',
+                action, re.IGNORECASE,
+            )
+            if city_match:
+                city = city_match.group(1).strip()
+        if not city:
+            city = memory_get("city", "Kuala Lumpur")
 
-        # Load weather skill for formatting guidelines
+        # Scan all memory for weather-related preferences
+        all_mem = memory_all()
+        weather_prefs_list = []
+        for key, value in all_mem.items():
+            key_lower = key.lower()
+            val_lower = str(value).lower()
+            if any(kw in key_lower or kw in val_lower
+                   for kw in [
+                       "weather", "temperature", "temp",
+                       "celsius", "fahrenheit", "dew",
+                       "wind", "humidity", "uv", "rain", "forecast",
+                   ]):
+                weather_prefs_list.append(f"- {key}: {value}")
+
+        if weather_prefs_list:
+            prefs_text = (
+                "USER WEATHER PREFERENCES (MUST follow exactly):\n" +
+                "\n".join(weather_prefs_list) +
+                "\nThese are mandatory requirements."
+            )
+        else:
+            prefs_text = (
+                "Use Celsius temperature units.\n"
+                "Include dew point, humidity, wind speed, UV index, rain chance."
+            )
+
         weather_skill = load_skills(scope="weather")
-
-        # Build preference text from user memory
-        prefs_text = get_topic_preferences("weather")
-        if not prefs_text:
-            prefs_text = "Use default weather format from guidelines below."
 
         system = (
             f"{weather_skill}\n\n"
             f"{prefs_text}\n\n"
-            f"You are ABbot weather reporter. "
-            f"City: {city}. "
-            f"Current date/time: {now}. "
-            f"Search for current weather in {city}. "
-            f"Follow user preferences exactly. "
-            f"Use the skill guidelines for format. "
-            f"If user wants Celsius, use Celsius. "
-            f"If user wants dew point, show it. "
-            f"Never ignore user preferences."
+            f"CRITICAL RULES:\n"
+            f"- Use CELSIUS (°C) ONLY unless user specifically requested Fahrenheit\n"
+            f"- NEVER use Fahrenheit by default\n"
+            f"- Include: temperature high/low, feels like, humidity, dew point, "
+            f"wind speed km/h, rain chance, UV index\n"
+            f"- City: {city}\n"
+            f"- Date: {now}\n"
+            f"- Search for current live weather data\n"
+            f"- Format report clearly and concisely"
+        )
+
+        search_query = (
+            f"current weather {city} today "
+            f"{datetime.now().strftime('%B %d %Y')} "
+            f"temperature celsius humidity wind"
         )
 
         msg = ask_claude_with_search(
             system,
-            f"Current weather in {city} right now "
-            f"{datetime.now().strftime('%d %B %Y %H:%M')}",
-            max_tokens=600,
+            search_query,
+            max_tokens=500,
             model=MODEL_FAST,
         )
         msg = clean_response(msg)
-        text = msg
+
+        text = (
+            f"Weather Report — {city}\n"
+            f"{datetime.now().strftime('%d %b %Y %H:%M')} MYT\n\n"
+            f"{msg}"
+        )
+        logger.info(f"Weather report generated for {city}")
 
     elif action in ("news_ai", "news") or re.search(r'last\s+\d+\s+hours?', action.lower()):
         from modules.rssfeed import fetch_ai_news, format_articles_for_telegram
@@ -478,7 +519,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
         )
         msg = ask_claude_with_search(system, action, model=MODEL_FAST)
         msg = clean_response(msg)
-        text = f"Scheduled Report\n{action}\n\n{msg}"
+        text = f"ABbot Report\n\n{msg}"
 
     try:
         await bot.send_message(chat_id=OWNER_CHAT_ID, text=text)
@@ -1184,10 +1225,29 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     elif intent == "weather":
         weather_skill = load_skills(scope="weather")
-        prefs_text = get_topic_preferences("weather")
-        if not prefs_text:
-            prefs_text = "Use default weather format."
         now_str = datetime.now().strftime("%d %B %Y %H:%M")
+
+        # Scan all memory for weather-related preferences
+        all_mem = memory_all()
+        weather_prefs_list = []
+        for key, value in all_mem.items():
+            key_lower = key.lower()
+            val_lower = str(value).lower()
+            if any(kw in key_lower or kw in val_lower
+                   for kw in [
+                       "weather", "temperature", "temp",
+                       "celsius", "fahrenheit", "dew",
+                       "wind", "humidity", "uv", "rain", "forecast",
+                   ]):
+                weather_prefs_list.append(f"- {key}: {value}")
+
+        if weather_prefs_list:
+            prefs_text = (
+                "USER WEATHER PREFERENCES (follow exactly):\n" +
+                "\n".join(weather_prefs_list)
+            )
+        else:
+            prefs_text = "Use Celsius always."
 
         # Detect multiple cities in the message
         text_lower = text.lower()
@@ -1220,13 +1280,14 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 system = (
                     f"{weather_skill}\n\n"
                     f"{prefs_text}\n\n"
+                    f"CRITICAL: Use CELSIUS only.\n"
                     f"Brief weather for {city}. "
                     f"Keep concise — max 6 lines. "
                     f"Date/time: {now_str}."
                 )
                 msg = ask_claude_with_search(
                     system,
-                    f"Current weather {city} right now {now_str}",
+                    f"current weather {city} today celsius humidity wind",
                     max_tokens=300,
                     model=MODEL_FAST,
                 )
@@ -1244,6 +1305,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             system = (
                 f"{weather_skill}\n\n"
                 f"{prefs_text}\n\n"
+                f"CRITICAL: Use CELSIUS (°C) ONLY. Never use Fahrenheit.\n"
                 f"You are ABbot weather reporter. "
                 f"Report weather for: {job_city}. "
                 f"Current date/time: {now_str}. "
@@ -1252,13 +1314,13 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.chat.send_action("typing")
             msg = ask_claude_with_search(
                 system,
-                f"Current weather in {job_city} right now {now_str}",
+                f"current weather {job_city} today celsius humidity wind dew point",
                 max_tokens=600,
                 model=MODEL_FAST,
             )
             msg = clean_response(msg)
             await update.message.reply_text(
-                f"Weather — {job_city}\n\n{msg}"
+                f"Weather Report — {job_city}\n\n{msg}"
             )
 
     elif intent == "report":

@@ -1,5 +1,8 @@
 # Weather Report Style
 
+CRITICAL: ALWAYS use Celsius (°C) temperatures.
+NEVER use Fahrenheit (°F) unless explicitly requested by the user.
+
 Default weather report format:
 - Temperature: Celsius (°C) always
 - Include: Current temp, High/Low for day
