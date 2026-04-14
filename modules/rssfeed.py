@@ -8,8 +8,56 @@ import time
 import email.utils
 import feedparser
 import logging
+import httpx
 from datetime import datetime, timezone, timedelta
 from modules.utils import is_article_published, mark_article_published
+
+
+def extract_og_image(url: str) -> str | None:
+    """
+    Fetch og:image meta tag from article URL.
+    Zero Claude tokens. One HTTP GET per new article. 4s timeout max.
+    """
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; ABbot/1.0; +https://abai.cloud)"}
+        r = httpx.get(url, timeout=4, follow_redirects=True, headers=headers)
+        if r.status_code != 200:
+            return None
+        html = r.text
+        if 'og:image' not in html:
+            return None
+        start = html.find('property="og:image"')
+        if start == -1:
+            start = html.find("property='og:image'")
+        if start == -1:
+            return None
+        content_start = html.find('content="', start)
+        if content_start == -1:
+            content_start = html.find("content='", start)
+            if content_start == -1:
+                return None
+            quote_char = "'"
+        else:
+            quote_char = '"'
+        content_start += len('content=') + 1
+        content_end = html.find(quote_char, content_start)
+        if content_end == -1:
+            return None
+        image_url = html[content_start:content_end].strip()
+        if not image_url.startswith("http") or len(image_url) > 500:
+            return None
+        return image_url
+    except Exception:
+        return None
+
+
+def get_source_domain(url: str) -> str:
+    """Extract bare domain from URL. e.g. 'https://techcrunch.com/...' → 'techcrunch.com'"""
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).netloc.replace("www.", "")
+    except Exception:
+        return ""
 
 logger = logging.getLogger(__name__)
 
@@ -710,6 +758,14 @@ def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
                 continue
             if need_url and not a.get("source_url"):
                 continue
+            # Fetch og:image AFTER dedup — only for articles we will publish
+            url = a.get("source_url", "")
+            if url:
+                a["image_url"] = extract_og_image(url)
+                a["source_domain"] = get_source_domain(url)
+            else:
+                a["image_url"] = None
+                a["source_domain"] = ""
             result.append(a)
             seen_titles.add(key)
             added += 1
