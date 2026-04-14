@@ -411,6 +411,8 @@ async def run_scheduled_job(bot, job_id: str, action: str):
                 "summary": a["summary"],
                 "category": "AI & Tech",
                 "source_url": a.get("source_url"),
+                "image_url": a.get("image_url"),
+                "source_domain": a.get("source_domain"),
             } for a in news_articles]
 
         else:
