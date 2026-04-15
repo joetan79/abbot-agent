@@ -542,6 +542,8 @@ def parse_article(item,
         "summary": summary,
         "source_name": source_name,
         "source_url": source_url,
+        # "published_at" — ISO string "%Y-%m-%dT%H:%M:%SZ" from parse_date(entry)
+        # This is the key callers must use; pub_dt (datetime) is removed by _clean_pub_dt()
         "published_at": pub_str,
         "pub_dt": pub_dt,
         "has_date": has_date,

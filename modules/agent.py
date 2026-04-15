@@ -406,6 +406,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
             )
 
             # Prepare articles for website
+            # "published_at" is the ISO string key from rssfeed.parse_article()
             articles = [{
                 "title": a["title"],
                 "summary": a["summary"],
@@ -413,6 +414,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
                 "source_url": a.get("source_url"),
                 "image_url": a.get("image_url"),
                 "source_domain": a.get("source_domain"),
+                "published": a.get("published_at") or a.get("published"),
             } for a in news_articles]
 
         else:
