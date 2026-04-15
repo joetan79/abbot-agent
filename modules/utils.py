@@ -939,24 +939,13 @@ def mark_article_published(url: str, title: str,
         "marked_at": datetime.now().isoformat(),
         "pub_date": pub_date,   # original article publish date
     }
-    # Auto-clean if too large — keep 7-day window
-    if len(published) > 1000:
-        cutoff = (
-            datetime.now() - timedelta(days=7)
-        ).isoformat()
-        published = {
-            u: data
-            for u, data in published.items()
-            if data.get("marked_at", "") > cutoff
-        }
-        logger.info("Auto-cleaned published articles")
     _save(PUBLISHED_ARTICLES_FILE, published)
 
 def get_published_count() -> int:
     """Get count of published articles."""
     return len(_load(PUBLISHED_ARTICLES_FILE))
 
-def clear_old_published(days: int = 7):
+def clear_old_published(days: int = 14):
     """Clear articles older than X days."""
     from datetime import timedelta
     published = _load(PUBLISHED_ARTICLES_FILE)

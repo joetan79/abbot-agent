@@ -17,6 +17,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from modules.utils import (
     is_owner, is_allowed, schedule_load_all,
     ask_claude_with_history, MODEL_SMART, get_preferences_prompt,
+    clear_old_published,
 )
 from modules.study import cmd_ask, cmd_math, cmd_chinese, cmd_homework, USER_PROFILES
 from modules.agent import (
@@ -503,8 +504,15 @@ async def main():
     app.bot_data["scheduler"] = scheduler
     restore_schedules(scheduler, app.bot)
     restore_reminders(scheduler, app.bot)
+    scheduler.add_job(
+        clear_old_published, "cron",
+        hour=3, minute=0,
+        id="daily_published_cleanup",
+        replace_existing=True,
+    )
     scheduler.start()
     logger.info("⏰ Scheduler started")
+    logger.info("🗑️ Daily published_articles cleanup scheduled at 03:00")
     app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("ask",       cmd_ask))
     app.add_handler(CommandHandler("math",      cmd_math))
