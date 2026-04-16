@@ -59,6 +59,25 @@ def get_source_domain(url: str) -> str:
     except Exception:
         return ""
 
+
+# Domains that block og:image scraping — skip the HTTP request entirely
+BLOCKED_IMAGE_DOMAINS = [
+    "bloomberg.com",
+    "reuters.com",
+    "wsj.com",
+    "ft.com",
+    "nytimes.com",
+    "economist.com",
+    "businessinsider.com",
+    "seekingalpha.com",
+]
+
+
+def is_blocked_image_domain(url: str) -> bool:
+    """Return True if this domain is known to block og:image extraction."""
+    domain = get_source_domain(url)
+    return any(blocked in domain for blocked in BLOCKED_IMAGE_DOMAINS)
+
 logger = logging.getLogger(__name__)
 
 # High-frequency primary feeds — post daily, used in all tiers
@@ -763,10 +782,16 @@ def fetch_ai_news(hours: int = 24, count: int = 5) -> list:
             # Fetch og:image AFTER dedup — only for articles we will publish
             url = a.get("source_url", "")
             if url:
-                a["image_url"] = extract_og_image(url)
                 a["source_domain"] = get_source_domain(url)
+                if is_blocked_image_domain(url):
+                    a["image_url"] = None
+                    a["image_blocked"] = True
+                else:
+                    a["image_url"] = extract_og_image(url)
+                    a["image_blocked"] = False
             else:
                 a["image_url"] = None
+                a["image_blocked"] = False
                 a["source_domain"] = ""
             result.append(a)
             seen_titles.add(key)
