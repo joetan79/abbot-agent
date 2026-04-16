@@ -193,6 +193,7 @@ SCHEDULE_FILE     = DATA_DIR / "schedules.json"
 TASKS_FILE        = DATA_DIR / "tasks.json"
 CACHE_FILE              = DATA_DIR / "news_cache.json"
 PUBLISHED_ARTICLES_FILE = DATA_DIR / "published_articles.json"
+ARTICLE_STATS_FILE      = DATA_DIR / "article_stats.json"
 TIME_WINDOWS_FILE = DATA_DIR / "time_windows.json"
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -927,12 +928,24 @@ def is_article_published(url: str) -> bool:
     published = _load(PUBLISHED_ARTICLES_FILE)
     return url in published
 
+def _increment_article_stats():
+    """Increment the cumulative total_ever counter in article_stats.json."""
+    try:
+        if ARTICLE_STATS_FILE.exists():
+            stats = json.loads(ARTICLE_STATS_FILE.read_text())
+        else:
+            stats = {"total_ever": 443}  # seed with known baseline
+        stats["total_ever"] = stats.get("total_ever", 443) + 1
+        stats["last_updated"] = datetime.now().isoformat()
+        ARTICLE_STATS_FILE.write_text(json.dumps(stats, indent=2))
+    except Exception as e:
+        logger.warning(f"Could not update article_stats.json: {e}")
+
 def mark_article_published(url: str, title: str,
                             pub_date: str = ""):
     """Mark article as published so it won't repeat."""
     if not url:
         return
-    from datetime import timedelta
     published = _load(PUBLISHED_ARTICLES_FILE)
     published[url] = {
         "title": title[:100],
@@ -940,6 +953,7 @@ def mark_article_published(url: str, title: str,
         "pub_date": pub_date,   # original article publish date
     }
     _save(PUBLISHED_ARTICLES_FILE, published)
+    _increment_article_stats()
 
 def get_published_count() -> int:
     """Get count of published articles."""
