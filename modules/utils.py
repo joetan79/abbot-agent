@@ -946,18 +946,46 @@ def get_published_count() -> int:
     return len(_load(PUBLISHED_ARTICLES_FILE))
 
 def clear_old_published(days: int = 14):
-    """Clear articles older than X days."""
-    from datetime import timedelta
+    """Clear articles older than X days, and those missing marked_at."""
+    import datetime as dt
     published = _load(PUBLISHED_ARTICLES_FILE)
-    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-    cleaned = {
-        url: data for url, data in published.items()
-        if data.get("marked_at", data.get("published_at", "")) > cutoff
-    }
-    _save(PUBLISHED_ARTICLES_FILE, cleaned)
-    removed = len(published) - len(cleaned)
-    if removed > 0:
-        logger.info(f"Cleared {removed} old published articles")
+    now = dt.datetime.now(dt.timezone.utc)
+    cutoff = now - dt.timedelta(days=days)
+
+    kept = {}
+    removed_missing = 0
+    removed_old = 0
+
+    for url, data in published.items():
+        if not isinstance(data, dict) or "marked_at" not in data:
+            removed_missing += 1
+            continue
+        try:
+            parsed = dt.datetime.fromisoformat(data["marked_at"])
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.timezone.utc)
+            if parsed >= cutoff:
+                kept[url] = data
+            else:
+                removed_old += 1
+        except Exception:
+            removed_missing += 1
+
+    _save(PUBLISHED_ARTICLES_FILE, kept)
+    if removed_missing:
+        logger.info(
+            f"Published cleanup: removed {removed_missing} entries "
+            f"missing marked_at (old format)"
+        )
+    if removed_old:
+        logger.info(
+            f"Published cleanup: removed {removed_old} entries "
+            f"older than {days} days"
+        )
+    total = removed_missing + removed_old
+    logger.info(
+        f"Published cleanup done: {total} removed, {len(kept)} kept"
+    )
 
 
 def ask_claude_news(system: str, user_msg: str, max_tokens: int = 1500) -> str:
