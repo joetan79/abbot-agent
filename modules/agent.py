@@ -476,6 +476,40 @@ async def run_scheduled_job(bot, job_id: str, action: str):
 
         text = f"News Briefing\n\n{msg}"
 
+    elif "xfeed" in action or "x_feed" in action or "x feed" in action:
+        from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published
+        import httpx, os
+        posts = fetch_x_posts(hours=8, count=10)
+        if posts:
+            msg = format_x_posts_for_telegram(posts)
+            await bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown", disable_web_page_preview=True)
+            WEBSITE_URL = os.getenv("WEBSITE_URL", "")
+            WEBSITE_API_KEY = os.getenv("WEBSITE_API_KEY", "")
+            if WEBSITE_URL:
+                try:
+                    payload = [
+                        {
+                            "title": p["title"],
+                            "summary": p["summary"],
+                            "source_url": p["url"],
+                            "source_name": p.get("source", "X"),
+                            "published": p.get("published", ""),
+                        }
+                        for p in posts
+                    ]
+                    httpx.post(
+                        f"{WEBSITE_URL}/api/publish-x",
+                        json={"posts": payload},
+                        headers={"X-API-Key": WEBSITE_API_KEY},
+                        timeout=15,
+                    )
+                    mark_x_posts_published(posts)
+                except Exception as e:
+                    logger.warning(f"xfeed scheduled: website publish failed: {e}")
+        else:
+            await bot.send_message(chat_id=OWNER_CHAT_ID, text="🐦 No new X posts found.")
+        return
+
     elif action in ("crypto", "crypto_snapshot") or \
          any(c in action.lower() for c in ["btc", "eth", "sol", "crypto"]):
         system = (
@@ -1427,6 +1461,60 @@ async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return
     await update.message.chat.send_action("typing")
     await run_scheduled_job(context.bot, "manual_news", "news_ai")
+
+async def cmd_xfeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually trigger X feed fetch and publish to website."""
+    if not is_owner(update.effective_chat.id):
+        return
+    msg = await update.message.reply_text("🐦 Fetching X updates...")
+    try:
+        import asyncio, httpx, os
+        from modules.xfeed import fetch_x_posts, fetch_x_posts_via_claude, format_x_posts_for_telegram, mark_x_posts_published
+
+        posts = await asyncio.to_thread(fetch_x_posts, 24, 10)
+
+        if not posts:
+            await msg.edit_text("🐦 RSSHub unavailable, trying Claude search...")
+            posts = await asyncio.to_thread(fetch_x_posts_via_claude, 24, 10)
+
+        if not posts:
+            await msg.edit_text("❌ No X posts found from any source.")
+            return
+
+        text = format_x_posts_for_telegram(posts)
+        await msg.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+
+        WEBSITE_URL = os.getenv("WEBSITE_URL", "")
+        WEBSITE_API_KEY = os.getenv("WEBSITE_API_KEY", "")
+        if WEBSITE_URL and posts:
+            try:
+                payload = [
+                    {
+                        "title": p.get("title", ""),
+                        "summary": p.get("summary", ""),
+                        "source_url": p.get("url") or p.get("source_url", ""),
+                        "source_name": p.get("source", "X"),
+                        "published": p.get("published", ""),
+                    }
+                    for p in posts
+                ]
+                await asyncio.to_thread(
+                    lambda: httpx.post(
+                        f"{WEBSITE_URL}/api/publish-x",
+                        json={"posts": payload},
+                        headers={"X-API-Key": WEBSITE_API_KEY},
+                        timeout=15,
+                    )
+                )
+                mark_x_posts_published(posts)
+            except Exception as e:
+                logger.warning(f"xfeed: website publish failed: {e}")
+    except Exception as e:
+        logger.error(f"cmd_xfeed error: {e}", exc_info=True)
+        try:
+            await msg.edit_text(f"❌ X feed error: {e}")
+        except Exception:
+            await update.message.reply_text(f"❌ X feed error: {e}")
 
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_chat.id): return

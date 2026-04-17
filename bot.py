@@ -22,7 +22,7 @@ from modules.utils import (
 from modules.study import cmd_ask, cmd_math, cmd_chinese, cmd_homework, USER_PROFILES
 from modules.agent import (
     handle_owner_message, run_scheduled_job,
-    cmd_tasks, cmd_schedules, cmd_memory, cmd_news, cmd_report, cmd_skills,
+    cmd_tasks, cmd_schedules, cmd_memory, cmd_news, cmd_xfeed, cmd_report, cmd_skills,
     cmd_memories, cmd_forget,
 )
 
@@ -522,6 +522,7 @@ async def main():
     app.add_handler(CommandHandler("schedules", cmd_schedules))
     app.add_handler(CommandHandler("memory",    cmd_memory))
     app.add_handler(CommandHandler("news",      cmd_news))
+    app.add_handler(CommandHandler("xfeed",     cmd_xfeed))
     app.add_handler(CommandHandler("report",    cmd_report))
     app.add_handler(CommandHandler("skills",    cmd_skills))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, route_message))
@@ -541,6 +542,7 @@ async def main():
         BotCommand("schedules",      "View active schedules"),
         BotCommand("memory",         "View bot memory"),
         BotCommand("news",           "Top AI & Tech news"),
+        BotCommand("xfeed",          "Fetch latest X / Twitter AI updates"),
         BotCommand("report",         "Daily report now"),
         BotCommand("skills",         "View loaded AI skills"),
         BotCommand("newsstatus",     "News tracking stats"),
