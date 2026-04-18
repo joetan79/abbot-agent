@@ -176,7 +176,7 @@ def format_x_posts_for_telegram(posts):
     if not posts:
         return "❌ No recent X posts found."
 
-    lines = ["*X / Twitter Updates* — last 8 hours\n"]
+    lines = ["*AI Pulse & Updates*\n"]
     for i, post in enumerate(posts, 1):
         source = post.get("source", "X")
         title = post.get("title", "")[:180]
@@ -200,3 +200,128 @@ def format_x_posts_for_telegram(posts):
 def mark_x_posts_published(posts):
     for post in posts:
         mark_article_published(post["url"], post.get("title", ""))
+
+
+XFEED_SEARCH_PROMPT = """Search the web right now for the latest AI news from the last 48 hours.
+
+Find recent announcements, model releases, research papers, or major news from any of these:
+OpenAI, Anthropic, Google DeepMind, Meta AI, Microsoft AI, NVIDIA, DeepSeek, Alibaba Qwen, Mistral AI, xAI, Hugging Face, Stability AI, Cohere, TII UAE.
+
+List up to 10 items you actually find. For each item give:
+- SOURCE: (company or lab name)
+- TITLE: (headline or announcement)
+- URL: (direct link)
+- DATE: (date if known)
+- WHY: (one sentence why it matters)
+
+Only list things you actually found via search. If you find fewer than 10, that is fine."""
+
+
+def parse_claude_news_response(raw):
+    """
+    Parse plain-text Claude search response into structured post dicts.
+    Handles source extraction from title, title cleanup, and dedup.
+    Returns list of up to 10 post dicts.
+    """
+    import re
+    from datetime import datetime as _dt
+
+    if not raw or len(raw.strip()) < 50:
+        return []
+
+    blocks = re.split(r'\n(?=\d+\.|\- SOURCE:|\*\*\d+)', raw)
+    if len(blocks) <= 1:
+        blocks = raw.split('\n\n')
+
+    known_labs = [
+        "OpenAI", "Anthropic", "Google DeepMind", "DeepMind",
+        "Meta AI", "Meta", "Microsoft", "NVIDIA", "DeepSeek",
+        "Alibaba", "Qwen", "Mistral", "xAI", "Cohere",
+        "Hugging Face", "Stability AI", "TII", "IBM",
+        "Samsung", "Baidu", "ByteDance", "01.AI", "EleutherAI",
+        "Inflection", "Writer", "SenseTime", "Zhipu", "KAIST",
+        "NAVER", "Google", "Apple", "Amazon", "Tesla",
+    ]
+
+    posts = []
+    seen_titles = []
+
+    for block in blocks:
+        if not block.strip():
+            continue
+
+        source_m = re.search(r'SOURCE:\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
+        title_m  = re.search(r'TITLE:\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
+        url_m    = re.search(r'URL:\s*(https?://\S+)', block, re.IGNORECASE)
+        date_m   = re.search(r'DATE:\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
+        why_m    = re.search(r'WHY:\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
+
+        # Fallback: use first non-blank line as title
+        if not title_m:
+            blines = [l.strip() for l in block.strip().split('\n') if l.strip()]
+            if blines:
+                first = blines[0].lstrip('0123456789.-* ')
+                if len(first) >= 10:
+                    class _M:
+                        def __init__(self, v): self._v = v
+                        def group(self, _): return self._v
+                    title_m = _M(first)
+
+        if not title_m:
+            continue
+
+        raw_title = title_m.group(1).strip()
+
+        # Source: explicit SOURCE field first, then scan title for known lab names
+        if source_m and source_m.group(1).strip().lower() not in ('ai lab', 'unknown', ''):
+            source = source_m.group(1).strip()
+        else:
+            source = "AI Lab"
+            for lab in known_labs:
+                if lab.lower() in raw_title.lower():
+                    source = lab
+                    break
+
+        # Strip "LabName - " / "LabName: " prefix embedded in title
+        if source != "AI Lab":
+            cleaned = re.sub(
+                r'^' + re.escape(source) + r'\s*[-:]\s*',
+                '', raw_title, flags=re.IGNORECASE,
+            ).strip()
+            title = cleaned if len(cleaned) >= 5 else raw_title
+        else:
+            title = raw_title
+
+        if len(title) < 10:
+            continue
+
+        # Dedup by title word overlap (>60% shared words = duplicate)
+        tc = title.lower().strip()
+        is_dup = False
+        for seen in seen_titles:
+            words_new  = set(tc.split())
+            words_seen = set(seen.split())
+            if words_new and words_seen:
+                if len(words_new & words_seen) / max(len(words_new), len(words_seen)) > 0.6:
+                    is_dup = True
+                    break
+            if tc in seen or seen in tc:
+                is_dup = True
+                break
+        if is_dup:
+            continue
+
+        seen_titles.append(tc)
+        url     = url_m.group(1).strip()   if url_m   else ""
+        date    = date_m.group(1).strip()  if date_m  else _dt.now().strftime("%Y-%m-%d")
+        summary = why_m.group(1).strip()   if why_m   else ""
+
+        posts.append({
+            "title":     title[:200],
+            "summary":   summary[:250],
+            "url":       url,
+            "source":    source,
+            "published": date[:10] if len(date) >= 10 else date,
+        })
+
+    return posts[:10]

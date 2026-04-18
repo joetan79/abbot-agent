@@ -424,36 +424,37 @@ async def run_scheduled_job(bot, job_id: str, action: str):
 
         # -- Publish to website --
         if articles:
-            logger.info(f"Total articles to publish: {len(articles)}")
-
             try:
                 import httpx
                 import os
                 website_url = os.environ.get("WEBSITE_URL", "http://localhost:8000")
                 api_key = os.environ.get("WEBSITE_API_KEY", "")
 
-                logger.info(f"Publishing {len(articles)} articles to {website_url}")
-                logger.info(f"API key present: {bool(api_key)}")
-
                 response = httpx.post(
                     f"{website_url}/api/publish",
                     json={"articles": articles},
                     headers={
                         "X-API-Key": api_key,
-                        "Authorization": f"Bearer {api_key}"
+                        "Authorization": f"Bearer {api_key}",
                     },
                     timeout=30,
                 )
-
-                if response.status_code == 200:
-                    logger.info(f"Published {len(articles)} articles to website")
-                else:
-                    logger.error(f"Publish failed: {response.status_code} - {response.text}")
+                response.raise_for_status()
+                result = response.json()
+                saved = result.get("saved", 0)
+                skipped = len(result.get("skipped", []))
+                logger.info(f"News website publish: saved={saved} skipped={skipped}")
+                await bot.send_message(
+                    chat_id=OWNER_CHAT_ID,
+                    text=f"✅ News website updated: {saved} new article(s) saved, {skipped} skipped (duplicates).",
+                )
 
             except Exception as e:
-                logger.error(f"Publish error: {e}", exc_info=True)
-
-            logger.info(f"Publish attempted to: {os.environ.get('WEBSITE_URL', 'http://localhost:8000')}")
+                logger.error(f"News website publish error: {e}", exc_info=True)
+                await bot.send_message(
+                    chat_id=OWNER_CHAT_ID,
+                    text=f"⚠️ News website publish failed: {e}",
+                )
         # -- End publish --
 
     elif action == "news_general":
@@ -477,69 +478,43 @@ async def run_scheduled_job(bot, job_id: str, action: str):
         text = f"News Briefing\n\n{msg}"
 
     elif "xfeed" in action or "x_feed" in action or "x feed" in action:
-        from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published
-        from modules.utils import ask_claude_with_search
-        import asyncio, httpx, os, json as _json
+        from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published, parse_claude_news_response, XFEED_SEARCH_PROMPT
+        from modules.utils import ask_claude_with_search, MODEL_SMART
+        import asyncio, httpx, os
         posts = await asyncio.to_thread(fetch_x_posts, 24, 10)
         if not posts:
             logger.info("xfeed scheduled: RSSHub failed, trying Claude web search fallback")
-            prompt = """Search for the most important AI announcements, model releases, and research breakthroughs from the last 24 hours only.
-
-Focus on posts and announcements from these labs and researchers:
-- US Labs: OpenAI, Anthropic, Google DeepMind, Meta AI, xAI, NVIDIA AI, Microsoft Research, IBM Research, Cohere, Mistral AI, Inflection AI
-- Asian Labs: DeepSeek, Baidu ERNIE, Alibaba Qwen, 01.AI (Yi model), Samsung AI, KAIST, NAVER AI, SenseTime, Zhipu AI (GLM)
-- Other Global: TII UAE (Falcon), Writer, Stability AI, Hugging Face, EleutherAI
-- Key researchers: Sam Altman, Andrej Karpathy, Yann LeCun, Demis Hassabis, Dario Amodei, Ilya Sutskever, Jim Fan
-
-Only include genuinely significant updates: new model releases, major research papers, product launches, important partnerships or funding. Skip minor blog posts and opinion pieces.
-
-Return ONLY a valid JSON array. No markdown, no code fences, no explanation. Maximum 10 items, minimum 1, sorted newest first. Only include items from the last 24 hours. If fewer than 10 significant updates exist, return only what is genuinely newsworthy.
-
-Each item must have exactly these keys:
-{"title": "headline max 200 chars", "summary": "why it matters in 1-2 sentences max 250 chars", "url": "direct url to announcement or article", "source": "lab or researcher name", "published": "YYYY-MM-DD"}"""
             try:
                 raw = await asyncio.to_thread(
                     ask_claude_with_search,
-                    "Return only a valid JSON array. No markdown fences. No explanation.",
-                    prompt,
+                    "You are a precise AI news researcher. Search the web and report what you actually find. Be factual and concrete.",
+                    XFEED_SEARCH_PROMPT,
                     None,
-                    1500,
+                    2000,
+                    MODEL_SMART,
                 )
-                clean = raw.strip().strip("```json").strip("```").strip()
-                posts = _json.loads(clean)
-                if not isinstance(posts, list):
-                    posts = []
+                posts = parse_claude_news_response(raw) if raw else []
             except Exception as fe:
                 logger.warning(f"xfeed scheduled: Claude fallback failed: {fe}")
                 posts = []
         if posts:
-            lines = ["🐦 *AI Pulse & Updates*\n"]
-            for i, p in enumerate(posts[:10], 1):
-                src = p.get("source", "X")
-                title = str(p.get("title", ""))[:180]
-                url = p.get("url", "")
-                lines.append(f"{i}. *{src}*")
-                lines.append(f"   {title}")
-                if url:
-                    lines.append(f"   🔗 {url}")
-                lines.append("")
-            msg = "\n".join(lines)
-            await bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown", disable_web_page_preview=True)
+            tg_msg = format_x_posts_for_telegram(posts)
+            await bot.send_message(chat_id=OWNER_CHAT_ID, text=tg_msg, parse_mode="Markdown", disable_web_page_preview=True)
             WEBSITE_URL = os.getenv("WEBSITE_URL", "")
             WEBSITE_API_KEY = os.getenv("WEBSITE_API_KEY", "")
             if WEBSITE_URL:
                 try:
                     payload = [
                         {
-                            "title": p.get("title", ""),
-                            "summary": p.get("summary", ""),
-                            "source_url": p.get("url", ""),
-                            "source_name": p.get("source", "X"),
-                            "published": p.get("published", ""),
+                            "title":       p.get("title", ""),
+                            "summary":     p.get("summary", ""),
+                            "source_url":  p.get("url", ""),
+                            "source_name": p.get("source", "AI Lab"),
+                            "published":   p.get("published", ""),
                         }
                         for p in posts
                     ]
-                    await asyncio.to_thread(
+                    resp = await asyncio.to_thread(
                         lambda: httpx.post(
                             f"{WEBSITE_URL}/api/publish-x",
                             json={"posts": payload},
@@ -547,11 +522,23 @@ Each item must have exactly these keys:
                             timeout=15,
                         )
                     )
+                    resp.raise_for_status()
+                    result = resp.json()
+                    saved, skipped = result.get("saved", 0), result.get("skipped", 0)
+                    logger.info(f"xfeed scheduled publish: saved={saved} skipped={skipped}")
                     mark_x_posts_published(posts)
+                    await bot.send_message(
+                        chat_id=OWNER_CHAT_ID,
+                        text=f"✅ AI Pulse website updated: {saved} new, {skipped} skipped",
+                    )
                 except Exception as e:
                     logger.warning(f"xfeed scheduled: website publish failed: {e}")
+                    await bot.send_message(
+                        chat_id=OWNER_CHAT_ID,
+                        text=f"⚠️ AI Pulse website publish failed: {e}",
+                    )
         else:
-            await bot.send_message(chat_id=OWNER_CHAT_ID, text="🐦 No new X posts found.")
+            await bot.send_message(chat_id=OWNER_CHAT_ID, text="No new AI Pulse updates found.")
         return
 
     elif action in ("crypto", "crypto_snapshot") or \
@@ -1519,43 +1506,31 @@ async def cmd_xfeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         posts = await asyncio.to_thread(fetch_x_posts, 24, 10)
 
         if not posts:
-            await msg.edit_text("🐦 RSSHub unavailable, trying Claude search...")
-            prompt = """Search for the most important AI announcements, model releases, and research breakthroughs from the last 24 hours only.
-
-Focus on posts and announcements from these labs and researchers:
-- US Labs: OpenAI, Anthropic, Google DeepMind, Meta AI, xAI, NVIDIA AI, Microsoft Research, IBM Research, Cohere, Mistral AI, Inflection AI
-- Asian Labs: DeepSeek, Baidu ERNIE, Alibaba Qwen, 01.AI (Yi model), Samsung AI, KAIST, NAVER AI, SenseTime, Zhipu AI (GLM)
-- Other Global: TII UAE (Falcon), Writer, Stability AI, Hugging Face, EleutherAI
-- Key researchers: Sam Altman, Andrej Karpathy, Yann LeCun, Demis Hassabis, Dario Amodei, Ilya Sutskever, Jim Fan
-
-Only include genuinely significant updates: new model releases, major research papers, product launches, important partnerships or funding. Skip minor blog posts and opinion pieces.
-
-Return ONLY a valid JSON array. No markdown, no code fences, no explanation. Maximum 10 items, minimum 1, sorted newest first. Only include items from the last 24 hours. If fewer than 10 significant updates exist, return only what is genuinely newsworthy.
-
-Each item must have exactly these keys:
-{"title": "headline max 200 chars", "summary": "why it matters in 1-2 sentences max 250 chars", "url": "direct url to announcement or article", "source": "lab or researcher name", "published": "YYYY-MM-DD"}"""
-
+            await msg.edit_text("🔍 Searching for AI updates...")
+            from modules.xfeed import parse_claude_news_response, XFEED_SEARCH_PROMPT
+            from modules.utils import MODEL_SMART
             raw = await asyncio.to_thread(
                 ask_claude_with_search,
-                "Return only a valid JSON array. No markdown fences. No explanation.",
-                prompt,
+                "You are a precise AI news researcher. Search the web and report what you actually find. Be factual and concrete.",
+                XFEED_SEARCH_PROMPT,
                 None,
-                1500,
+                2000,
+                MODEL_SMART,
             )
-            try:
-                clean = raw.strip().strip("```json").strip("```").strip()
-                posts = json.loads(clean)
-                if not isinstance(posts, list):
-                    posts = []
-            except Exception as je:
-                logger.warning(f"xfeed json parse error: {je} | raw: {raw[:200]}")
-                posts = []
+            posts = parse_claude_news_response(raw) if raw else []
+            if not posts:
+                if raw and len(raw.strip()) >= 50:
+                    await msg.edit_text("📰 AI Updates:\n\n" + (raw[:3000] if len(raw) > 3000 else raw))
+                else:
+                    await msg.edit_text("❌ No AI updates found. Try again later.")
+                return
+            logger.info(f"xfeed: Claude fallback parsed {len(posts)} post(s)")
 
         if not posts:
             await msg.edit_text("❌ No X posts found from any source.")
             return
 
-        lines = ["🐦 *X / Twitter Updates*\n"]
+        lines = ["*AI Pulse & Updates*\n"]
         for i, p in enumerate(posts[:8], 1):
             src = p.get("source", "X")
             title = str(p.get("title", ""))[:180]
@@ -1583,7 +1558,7 @@ Each item must have exactly these keys:
                     }
                     for p in posts
                 ]
-                await asyncio.to_thread(
+                resp = await asyncio.to_thread(
                     lambda: httpx.post(
                         f"{WEBSITE_URL}/api/publish-x",
                         json={"posts": payload},
@@ -1591,8 +1566,17 @@ Each item must have exactly these keys:
                         timeout=15,
                     )
                 )
+                resp.raise_for_status()
+                result = resp.json()
+                saved = result.get("saved", 0)
+                skipped = result.get("skipped", 0)
+                await update.message.reply_text(
+                    f"✅ Website updated: {saved} new post(s) saved, {skipped} skipped (duplicates)."
+                )
+                logger.info(f"xfeed publish: saved={saved} skipped={skipped}")
             except Exception as we:
                 logger.warning(f"xfeed website publish failed: {we}")
+                await update.message.reply_text(f"⚠️ Website publish failed: {we}")
     except Exception as e:
         logger.error(f"cmd_xfeed error: {e}", exc_info=True)
         try:
