@@ -20,25 +20,45 @@ RSSHUB_INSTANCES = [
 ]
 
 X_ACCOUNTS = [
+    # US Major Labs
     "OpenAI",
     "AnthropicAI",
     "GoogleDeepMind",
+    "MetaAI",
+    "xai",
+    "NVIDIAAl",
+    "MSFTResearch",
+    "IBMResearch",
+    "CohereAI",
+    "MistralAI",
+    # Key Researchers
+    "sama",
     "karpathy",
     "ylecun",
-    "sama",
-    "GaryMarcus",
-    "emollick",
     "demishassabis",
-    "xai",
+    "ilyasut",
+    "drjimfan",
+    # Asian Labs
+    "deepseek_ai",
+    "Alibaba_Qwen",
+    "01AI_Yi",
+    "SamsungAILab",
+    # Other Global
+    "TIIuae",
+    "huggingface",
+    "StabilityAI",
+    "EleutherAI",
 ]
 
 X_KEYWORDS = [
-    "LLM release",
-    "AI model launched",
-    "GPT new",
-    "Claude new",
-    "Gemini AI",
-    "open source LLM",
+    "AI model release 2026",
+    "LLM benchmark new",
+    "open source AI model",
+    "DeepSeek new model",
+    "Qwen model release",
+    "AI research breakthrough",
+    "foundation model launch",
+    "AGI announcement",
 ]
 
 X_CACHE_KEY = "x_feed_cache"
@@ -114,7 +134,7 @@ def _fetch_from_instance(instance, hours, count):
     return posts
 
 
-def fetch_x_posts(hours=8, count=10):
+def fetch_x_posts(hours=24, count=10):
     cached = get_cached_news(X_CACHE_KEY)
     if cached:
         logger.info("xfeed: returning cached X posts")
@@ -150,46 +170,6 @@ def fetch_x_posts(hours=8, count=10):
     set_cached_news(X_CACHE_KEY, cache_safe, ttl_hours=1)
 
     return all_posts[:count]
-
-
-def fetch_x_posts_via_claude(hours=8, count=10):
-    """Fallback: use Claude web search to find recent AI tweets/posts."""
-    from modules.utils import ask_claude_with_search
-    import json
-
-    prompt = f"""Search for the most recent posts and announcements from AI researchers and labs in the last {hours} hours.
-Search for recent activity from: OpenAI, Anthropic, Google DeepMind, Sam Altman (@sama), Andrej Karpathy (@karpathy), Yann LeCun (@ylecun).
-Also search for: latest AI model announcements today, new LLM releases.
-
-Return ONLY a JSON array with no other text, no markdown fences, no explanation.
-Each item must have these exact keys:
-- title: the post text or headline (max 200 chars)
-- summary: brief context about why it matters (max 300 chars)
-- url: direct URL to the post or source article
-- source: account or publication name (e.g. "@OpenAI", "Anthropic Blog")
-- published: date string (e.g. "2026-04-18")
-
-Return at most {count} items, newest first. Only include real posts with real verifiable URLs."""
-
-    try:
-        response = ask_claude_with_search(
-            system="You are a precise JSON generator. Return only a valid JSON array, no markdown, no explanation, no code fences.",
-            user_msg=prompt,
-            max_tokens=2000,
-        )
-        clean = response.strip()
-        if clean.startswith("```"):
-            clean = clean.split("```")[1]
-            if clean.startswith("json"):
-                clean = clean[4:]
-        clean = clean.strip()
-        posts = json.loads(clean)
-        if isinstance(posts, list):
-            return posts[:count]
-        return []
-    except Exception as e:
-        logger.warning(f"xfeed claude fallback error: {e}")
-        return []
 
 
 def format_x_posts_for_telegram(posts):

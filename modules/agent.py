@@ -479,7 +479,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
     elif "xfeed" in action or "x_feed" in action or "x feed" in action:
         from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published
         import httpx, os
-        posts = fetch_x_posts(hours=8, count=10)
+        posts = fetch_x_posts(hours=24, count=10)
         if posts:
             msg = format_x_posts_for_telegram(posts)
             await bot.send_message(chat_id=OWNER_CHAT_ID, text=msg, parse_mode="Markdown", disable_web_page_preview=True)
@@ -1468,20 +1468,60 @@ async def cmd_xfeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = await update.message.reply_text("🐦 Fetching X updates...")
     try:
-        import asyncio, httpx, os
-        from modules.xfeed import fetch_x_posts, fetch_x_posts_via_claude, format_x_posts_for_telegram, mark_x_posts_published
+        import asyncio, httpx, os, json
+        from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published
+        from modules.utils import ask_claude_with_search
 
         posts = await asyncio.to_thread(fetch_x_posts, 24, 10)
 
         if not posts:
             await msg.edit_text("🐦 RSSHub unavailable, trying Claude search...")
-            posts = await asyncio.to_thread(fetch_x_posts_via_claude, 24, 10)
+            prompt = """Search for the most important AI announcements, model releases, and research breakthroughs from the last 24 hours only.
+
+Focus on posts and announcements from these labs and researchers:
+- US Labs: OpenAI, Anthropic, Google DeepMind, Meta AI, xAI, NVIDIA AI, Microsoft Research, IBM Research, Cohere, Mistral AI, Inflection AI
+- Asian Labs: DeepSeek, Baidu ERNIE, Alibaba Qwen, 01.AI (Yi model), Samsung AI, KAIST, NAVER AI, SenseTime, Zhipu AI (GLM)
+- Other Global: TII UAE (Falcon), Writer, Stability AI, Hugging Face, EleutherAI
+- Key researchers: Sam Altman, Andrej Karpathy, Yann LeCun, Demis Hassabis, Dario Amodei, Ilya Sutskever, Jim Fan
+
+Only include genuinely significant updates: new model releases, major research papers, product launches, important partnerships or funding. Skip minor blog posts and opinion pieces.
+
+Return ONLY a valid JSON array. No markdown, no code fences, no explanation. Maximum 10 items, minimum 1, sorted newest first. Only include items from the last 24 hours. If fewer than 10 significant updates exist, return only what is genuinely newsworthy.
+
+Each item must have exactly these keys:
+{"title": "headline max 200 chars", "summary": "why it matters in 1-2 sentences max 250 chars", "url": "direct url to announcement or article", "source": "lab or researcher name", "published": "YYYY-MM-DD"}"""
+
+            raw = await asyncio.to_thread(
+                ask_claude_with_search,
+                "Return only a valid JSON array. No markdown fences. No explanation.",
+                prompt,
+                1500,
+            )
+            try:
+                clean = raw.strip().strip("```json").strip("```").strip()
+                posts = json.loads(clean)
+                if not isinstance(posts, list):
+                    posts = []
+            except Exception as je:
+                logger.warning(f"xfeed json parse error: {je} | raw: {raw[:200]}")
+                posts = []
 
         if not posts:
             await msg.edit_text("❌ No X posts found from any source.")
             return
 
-        text = format_x_posts_for_telegram(posts)
+        lines = ["🐦 *X / Twitter Updates*\n"]
+        for i, p in enumerate(posts[:8], 1):
+            src = p.get("source", "X")
+            title = str(p.get("title", ""))[:180]
+            url = p.get("url", "")
+            lines.append(f"{i}. *{src}*")
+            lines.append(f"   {title}")
+            if url:
+                lines.append(f"   🔗 {url}")
+            lines.append("")
+        text = "\n".join(lines)
+
         await msg.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
         WEBSITE_URL = os.getenv("WEBSITE_URL", "")
@@ -1492,7 +1532,7 @@ async def cmd_xfeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {
                         "title": p.get("title", ""),
                         "summary": p.get("summary", ""),
-                        "source_url": p.get("url") or p.get("source_url", ""),
+                        "source_url": p.get("url", ""),
                         "source_name": p.get("source", "X"),
                         "published": p.get("published", ""),
                     }
@@ -1506,9 +1546,8 @@ async def cmd_xfeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         timeout=15,
                     )
                 )
-                mark_x_posts_published(posts)
-            except Exception as e:
-                logger.warning(f"xfeed: website publish failed: {e}")
+            except Exception as we:
+                logger.warning(f"xfeed website publish failed: {we}")
     except Exception as e:
         logger.error(f"cmd_xfeed error: {e}", exc_info=True)
         try:
