@@ -478,7 +478,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
         text = f"News Briefing\n\n{msg}"
 
     elif "xfeed" in action or "x_feed" in action or "x feed" in action:
-        from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published, parse_claude_news_response, XFEED_SEARCH_PROMPT
+        from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published, parse_claude_news_response, get_xfeed_search_prompt
         from modules.utils import ask_claude_with_search, MODEL_SMART
         import asyncio, httpx, os
         posts = await asyncio.to_thread(fetch_x_posts, 24, 10)
@@ -488,7 +488,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
                 raw = await asyncio.to_thread(
                     ask_claude_with_search,
                     "You are a precise AI news researcher. Search the web and report what you actually find. Be factual and concrete.",
-                    XFEED_SEARCH_PROMPT,
+                    get_xfeed_search_prompt(),
                     None,
                     2000,
                     MODEL_SMART,
@@ -509,7 +509,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
                             "title":       p.get("title", ""),
                             "summary":     p.get("summary", ""),
                             "source_url":  p.get("url", ""),
-                            "source_name": p.get("source", "AI Lab"),
+                            "source_name": p.get("source", "AI Research"),
                             "published":   p.get("published", ""),
                         }
                         for p in posts
@@ -1507,12 +1507,12 @@ async def cmd_xfeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not posts:
             await msg.edit_text("🔍 Searching for AI updates...")
-            from modules.xfeed import parse_claude_news_response, XFEED_SEARCH_PROMPT
+            from modules.xfeed import parse_claude_news_response, get_xfeed_search_prompt
             from modules.utils import MODEL_SMART
             raw = await asyncio.to_thread(
                 ask_claude_with_search,
                 "You are a precise AI news researcher. Search the web and report what you actually find. Be factual and concrete.",
-                XFEED_SEARCH_PROMPT,
+                get_xfeed_search_prompt(),
                 None,
                 2000,
                 MODEL_SMART,
