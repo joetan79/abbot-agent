@@ -207,6 +207,14 @@ IMPORTANT RULES:
 - If user wants to set/change a time window for an activity → use intent "time_window_set"
   Extract the activity name into "activity" and hours into "hours".
 
+NEWS INTENT RULES (critical):
+- Return "news" intent ONLY when user explicitly requests to fetch/get/show/pull news
+  (e.g. "get latest news", "show me news", "fetch news", "/news", "send me news", "news now")
+- Return "chat" intent when user mentions a news topic conversationally or asks about a feature
+  (e.g. "what is AI pulse", "why did AI pulse fail", "I mean the AI pulse & update", "tell me about xfeed")
+- "AI pulse", "xfeed", "AI pulse & updates" mentioned as a topic → "chat", NOT "news"
+- Only explicit fetch/get/show requests → "news"
+
 WEATHER EXAMPLES:
 "weather in Tokyo" → {"intent":"weather","city":"Tokyo","action":"weather"}
 "current weather London" → {"intent":"weather","city":"London","action":"weather"}
@@ -280,6 +288,10 @@ def is_failed_response(text: str) -> bool:
         "please check",
         "search results do not",
         "most recent tech news in my search",
+        "sorry",
+        "trouble responding",
+        "had trouble",
+        "please try again",
     ]
     text_lower = text.lower()
     return any(phrase in text_lower for phrase in failure_phrases)
@@ -995,9 +1007,20 @@ async def fire_reminder(
 
 
 async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Use full_context if available (includes quoted message)
-    text = context.user_data.pop("full_context", None) \
-           or update.message.text or ""
+    # Discard any stale full_context from user_data
+    context.user_data.pop("full_context", None)
+
+    original_text = update.message.text or update.message.caption or ""
+
+    # Extract quoted/replied-to message and build context-aware text for Claude
+    text = original_text
+    if update.message.reply_to_message:
+        replied = update.message.reply_to_message
+        replied_text = (replied.text or replied.caption or "").strip()
+        if replied_text:
+            if len(replied_text) > 400:
+                replied_text = replied_text[:400] + "..."
+            text = f'[Replying to: "{replied_text}"]\n\n{original_text}'
 
     # ── ACTIVITY COMPLETION DETECTION ─────────
     activity_info = detect_activity_completion(text)
@@ -1289,8 +1312,21 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             )
 
     elif intent == "news":
-        await update.message.chat.send_action("typing")
-        await run_scheduled_job(context.bot, "manual_news", "news_ai")
+        explicit_triggers = [
+            "fetch", "get", "show", "latest news", "news now",
+            "pull news", "/news", "send news", "check news", "run news",
+        ]
+        text_lower = text.lower()
+        is_explicit = any(t in text_lower for t in explicit_triggers)
+
+        if not is_explicit:
+            user_id = str(update.effective_user.id)
+            system = build_owner_system_prompt(user_id, text)
+            reply = ask_claude_with_history(system, text, user_id, model=MODEL_SMART)
+            await update.message.reply_text(reply)
+        else:
+            await update.message.chat.send_action("typing")
+            await run_scheduled_job(context.bot, "manual_news", "news_ai")
 
     elif intent == "weather":
         weather_skill = load_skills(scope="weather")
@@ -1398,13 +1434,10 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     else:
         user_id = str(update.effective_user.id)
-        text_for_context = (
-            context.user_data.pop("full_context", None) or
-            update.message.text or ""
-        )
+        text_for_context = text  # includes quoted context for Claude
 
-        # Auto extract and save new memories
-        auto_extract_memory(user_id, text_for_context)
+        # Auto extract and save new memories from raw text only
+        auto_extract_memory(user_id, original_text)
 
         # Selective memory injection based on query
         relevant_mem = get_relevant_memories(
@@ -1443,14 +1476,16 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 system,
                 text_for_context,
                 user_id,
-                model=MODEL_SMART
+                model=MODEL_SMART,
+                history_text=original_text,
             )
         else:
             reply = ask_claude_with_history(
                 system,
                 text_for_context,
                 user_id,
-                model=MODEL_SMART
+                model=MODEL_SMART,
+                history_text=original_text,
             )
 
         await update.message.reply_text(reply)
@@ -1519,10 +1554,13 @@ async def cmd_xfeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             posts = parse_claude_news_response(raw) if raw else []
             if not posts:
-                if raw and len(raw.strip()) >= 50:
+                if raw and len(raw.strip()) >= 50 and not is_failed_response(raw):
                     await msg.edit_text("📰 AI Updates:\n\n" + (raw[:3000] if len(raw) > 3000 else raw))
                 else:
-                    await msg.edit_text("❌ No AI updates found. Try again later.")
+                    await msg.edit_text(
+                        "AI Pulse & Updates: No updates found right now. "
+                        "Claude search unavailable — will retry at next scheduled run."
+                    )
                 return
             logger.info(f"xfeed: Claude fallback parsed {len(posts)} post(s)")
 

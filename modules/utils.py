@@ -720,10 +720,13 @@ def history_summary(user_id: str) -> str:
 def ask_claude_with_history(system: str, user_msg: str,
                              user_id: str, max_tokens: int = 1500,
                              model: str = None,
-                             max_retries: int = 2) -> str:
-    """Send message to Claude with full conversation history for context."""
+                             max_retries: int = 2,
+                             history_text: str = None) -> str:
+    """Send message to Claude with full conversation history for context.
+    history_text: if provided, saved to history instead of user_msg (keeps history clean of quoted-context prefixes)."""
     if model is None:
         model = MODEL_SMART
+    save_text = history_text if history_text is not None else user_msg
     for attempt in range(max_retries + 1):
         try:
             history = history_get(user_id, limit=20)
@@ -736,7 +739,7 @@ def ask_claude_with_history(system: str, user_msg: str,
                 timeout=30.0,
             )
             response_text = r.content[0].text
-            history_add(user_id, "user", user_msg)
+            history_add(user_id, "user", save_text)
             history_add(user_id, "assistant", response_text)
             return response_text
         except anthropic.APITimeoutError:
@@ -857,8 +860,10 @@ def get_topic_preferences(topic: str) -> str:
 
 def ask_claude_with_search(system: str, user_msg: str,
                             user_id: str = None, max_tokens: int = 1500,
-                            model: str = None) -> str:
-    """Ask Claude with web search tool enabled for real-time data."""
+                            model: str = None,
+                            history_text: str = None) -> str:
+    """Ask Claude with web search tool enabled for real-time data.
+    history_text: if provided, saved to history instead of user_msg."""
     if model is None:
         model = MODEL_FAST
     try:
@@ -878,6 +883,7 @@ def ask_claude_with_search(system: str, user_msg: str,
                 "name": "web_search"
             }],
             messages=messages,
+            timeout=90.0,
         )
 
         # Extract all text from response blocks
@@ -891,7 +897,8 @@ def ask_claude_with_search(system: str, user_msg: str,
 
         # Save to history if user_id provided
         if user_id and full_response:
-            history_add(user_id, "user", user_msg)
+            save_text = history_text if history_text is not None else user_msg
+            history_add(user_id, "user", save_text)
             history_add(user_id, "assistant", full_response)
 
         return full_response or "Sorry, I could not find results for that."

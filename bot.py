@@ -142,8 +142,6 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if is_private and is_owner(chat_id):
-            # Store quoted context for handler to use
-            context.user_data["full_context"] = full_context
             await handle_owner_message(update, context)
             return
 
@@ -160,7 +158,7 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await msg.chat.send_action("typing")
         await msg.reply_text(
-            ask_claude_with_history(system, full_context, user_id, model=MODEL_SMART)
+            ask_claude_with_history(system, full_context, user_id, model=MODEL_SMART, history_text=text)
         )
     except Exception as e:
         logger.error(f"route_message error: {e}")
