@@ -20,7 +20,7 @@ from .utils import (
     OWNER_CHAT_ID,
     clean_response,
     get_cached_news, set_cached_news,
-    MODEL_FAST, MODEL_SMART,
+    MODEL_FAST, MODEL_SMART, MODEL_PREMIUM,
 )
 from .skills_loader import load_skills, list_skills, get_skill_token_estimate
 
@@ -491,7 +491,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
 
     elif "xfeed" in action or "x_feed" in action or "x feed" in action:
         from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published, parse_claude_news_response, get_xfeed_search_prompt
-        from modules.utils import ask_claude_with_search, MODEL_SMART
+        from modules.utils import ask_claude_with_search
         import asyncio, httpx, os
         posts = await asyncio.to_thread(fetch_x_posts, 24, 10)
         if not posts:
@@ -503,7 +503,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
                     get_xfeed_search_prompt(),
                     None,
                     2000,
-                    MODEL_SMART,
+                    MODEL_PREMIUM,
                 )
                 posts = parse_claude_news_response(raw) if raw else []
             except Exception as fe:
@@ -1543,14 +1543,13 @@ async def cmd_xfeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not posts:
             await msg.edit_text("🔍 Searching for AI updates...")
             from modules.xfeed import parse_claude_news_response, get_xfeed_search_prompt
-            from modules.utils import MODEL_SMART
             raw = await asyncio.to_thread(
                 ask_claude_with_search,
                 "You are a precise AI news researcher. Search the web and report what you actually find. Be factual and concrete.",
                 get_xfeed_search_prompt(),
                 None,
                 2000,
-                MODEL_SMART,
+                MODEL_PREMIUM,
             )
             posts = parse_claude_news_response(raw) if raw else []
             if not posts:
