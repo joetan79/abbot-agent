@@ -215,6 +215,16 @@ NEWS INTENT RULES (critical):
 - "AI pulse", "xfeed", "AI pulse & updates" mentioned as a topic → "chat", NOT "news"
 - Only explicit fetch/get/show requests → "news"
 
+XFEED INTENT RULES:
+- Return "xfeed" intent ONLY when user explicitly requests to fetch/show/get AI Pulse posts
+  Examples: "show AI pulse", "get xfeed", "AI pulse last 12 hours", "show me 5 AI pulse posts",
+  "fetch AI pulse today", "xfeed 6h", "run xfeed", "get AI pulse updates"
+- Return "chat" intent for conversational mentions: "did xfeed work?", "what is AI pulse?"
+- Extract hours if mentioned: "last 12 hours" → hours: 12, "today" → hours: 24, "48h" → hours: 48
+- Extract count if mentioned: "show 5 posts" → count: 5
+- Default: hours: 24, count: 10
+- Return: {"intent": "xfeed", "hours": <number>, "count": <number>}
+
 WEATHER EXAMPLES:
 "weather in Tokyo" → {"intent":"weather","city":"Tokyo","action":"weather"}
 "current weather London" → {"intent":"weather","city":"London","action":"weather"}
@@ -250,7 +260,7 @@ CHINESE EXAMPLES (Traditional and Simplified):
 
 Return JSON:
 {
-  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, weather, report, time_window_set, chat],
+  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, chat],
   "time": "HH:MM" or null,
   "frequency": "daily" or "weekly" or "once" or null,
   "day": day of week or null,
@@ -1328,6 +1338,65 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.chat.send_action("typing")
             await run_scheduled_job(context.bot, "manual_news", "news_ai")
 
+    elif intent == "xfeed":
+        import asyncio, httpx, os
+        from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published, parse_claude_news_response, get_xfeed_search_prompt
+
+        hours = min(int(intent_data.get("hours") or 24), 72)
+        count = min(int(intent_data.get("count") or 10), 20)
+
+        await update.message.reply_text(f"🐦 Fetching AI Pulse... (last {hours}h, up to {count} posts)")
+
+        posts = await asyncio.to_thread(fetch_x_posts, hours, count)
+
+        if not posts:
+            raw = await asyncio.to_thread(
+                ask_claude_with_search,
+                "You are a precise AI news researcher. Search the web and report what you actually find. Be factual and concrete.",
+                get_xfeed_search_prompt(),
+                None,
+                2000,
+                MODEL_PREMIUM,
+            )
+            posts = parse_claude_news_response(raw) if raw else []
+
+        if not posts:
+            await update.message.reply_text("❌ No AI Pulse posts found.")
+            return
+
+        tg_msg = format_x_posts_for_telegram(posts)
+        await update.message.reply_text(tg_msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+        WEBSITE_URL = os.getenv("WEBSITE_URL", "")
+        WEBSITE_API_KEY = os.getenv("WEBSITE_API_KEY", "")
+        if WEBSITE_URL:
+            try:
+                payload = [
+                    {
+                        "title": p.get("title", ""),
+                        "summary": p.get("summary", ""),
+                        "source_url": p.get("url", ""),
+                        "source_name": p.get("source", "AI Research"),
+                        "published": p.get("published", ""),
+                    }
+                    for p in posts
+                ]
+                resp = await asyncio.to_thread(
+                    lambda: httpx.post(
+                        f"{WEBSITE_URL}/api/publish-x",
+                        json={"posts": payload},
+                        headers={"X-API-Key": WEBSITE_API_KEY},
+                        timeout=15,
+                    )
+                )
+                resp.raise_for_status()
+                result = resp.json()
+                saved, skipped = result.get("saved", 0), result.get("skipped", 0)
+                mark_x_posts_published(posts)
+                await update.message.reply_text(f"✅ Website updated: {saved} new post(s) saved, {skipped} skipped")
+            except Exception as e:
+                await update.message.reply_text(f"⚠️ Website publish failed: {e}")
+
     elif intent == "weather":
         weather_skill = load_skills(scope="weather")
         now_str = datetime.now().strftime("%d %B %Y %H:%M")
@@ -1529,16 +1598,29 @@ async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_scheduled_job(context.bot, "manual_news", "news_ai")
 
 async def cmd_xfeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manually trigger X feed fetch and publish to website."""
+    """Fetch AI Pulse & Updates. Accepts optional args: /xfeed [hours] [count]"""
     if not is_owner(update.effective_chat.id):
         return
-    msg = await update.message.reply_text("🐦 Fetching X updates...")
+
+    # Parse optional arguments: /xfeed [Nh] [count]
+    hours = 24
+    count = 10
+    for arg in (context.args or []):
+        arg = arg.lower().strip()
+        if arg.endswith("h") and arg[:-1].isdigit():
+            hours = int(arg[:-1])
+        elif arg.isdigit():
+            count = int(arg)
+    hours = min(hours, 72)
+    count = min(count, 20)
+
+    msg = await update.message.reply_text(f"🐦 Fetching AI Pulse... (last {hours}h, up to {count} posts)")
     try:
         import asyncio, httpx, os, json
         from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published
         from modules.utils import ask_claude_with_search
 
-        posts = await asyncio.to_thread(fetch_x_posts, 24, 10)
+        posts = await asyncio.to_thread(fetch_x_posts, hours, count)
 
         if not posts:
             await msg.edit_text("🔍 Searching for AI updates...")
