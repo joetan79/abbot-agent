@@ -2,6 +2,7 @@
 
 import re
 import sys
+import asyncio
 import json, logging
 from datetime import datetime, timezone, timedelta
 from telegram import Update
@@ -21,6 +22,7 @@ from .utils import (
     clean_response,
     get_cached_news, set_cached_news,
     MODEL_FAST, MODEL_SMART, MODEL_PREMIUM,
+    parse_duration_to_seconds,
 )
 from .skills_loader import load_skills, list_skills, get_skill_token_estimate
 
@@ -258,9 +260,35 @@ CHINESE EXAMPLES (Traditional and Simplified):
 "KL天气" → {"intent":"weather","city":"KL","action":"weather"}
 "吉隆坡天气怎么样" → {"intent":"weather","city":"吉隆坡","action":"weather"}
 
+DELETION INTENT RULES:
+- Return "message_delete_reply" when user is replying to a message and asking to delete it immediately.
+  Examples: "delete this", "delete it", "remove this", "删除这个", "删掉这条", "刪除這個", "刪掉"
+- Return "message_delete_last" when user wants to delete the last N bot messages.
+  Examples: "delete last 5 messages", "delete my last 3 messages", "删掉最后5条", "刪掉最近5條"
+  Extract number into "target_count". Default to 1 if no number given.
+- Return "message_schedule_delete_reply" when user is replying to a message and wants to schedule its deletion.
+  Examples: "delete in 30 minutes", "delete this in 2 hours", "30分钟后删除", "2小時後刪除"
+  Compute "duration_seconds": 30 min → 1800, 2 hours → 7200, 1 day → 86400.
+- Return "message_auto_delete_request" when user wants an upcoming response to auto-delete.
+  Examples: "send me weather and delete after 1 hour", "get crypto report and auto-delete after 30 min"
+  Compute "duration_seconds".
+- Return "message_delete_cancel" when user wants to cancel scheduled deletions.
+  Examples: "cancel deletion", "cancel pending deletes", "取消刪除"
+
+DELETION EXAMPLES:
+"delete this" → {"intent":"message_delete_reply"}
+"delete it" → {"intent":"message_delete_reply"}
+"删除这个" → {"intent":"message_delete_reply"}
+"刪掉" → {"intent":"message_delete_reply"}
+"delete last 5 messages" → {"intent":"message_delete_last","target_count":5}
+"delete the last 3" → {"intent":"message_delete_last","target_count":3}
+"delete in 30 minutes" → {"intent":"message_schedule_delete_reply","duration_seconds":1800}
+"delete this in 2 hours" → {"intent":"message_schedule_delete_reply","duration_seconds":7200}
+"30分钟后删除" → {"intent":"message_schedule_delete_reply","duration_seconds":1800}
+
 Return JSON:
 {
-  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, chat],
+  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, chat],
   "time": "HH:MM" or null,
   "frequency": "daily" or "weekly" or "once" or null,
   "day": day of week or null,
@@ -270,7 +298,9 @@ Return JSON:
   "task_id": task id or null,
   "city": city name extracted from message or null,
   "activity": activity name or null,
-  "hours": number of hours or null
+  "hours": number of hours or null,
+  "target_count": integer for delete_last or null,
+  "duration_seconds": integer seconds for scheduled/auto-delete or null
 }
 Return ONLY the JSON object, no markdown, no explanation."""
     raw = ask_claude(system, text, max_tokens=300, model=MODEL_FAST)
@@ -1016,6 +1046,102 @@ async def fire_reminder(
         )
 
 
+async def handle_delete_reply(update, context):
+    """Delete both the replied-to message AND the user's command message."""
+    from modules.message_manager import delete_message_safe
+    if update.effective_user.id != OWNER_CHAT_ID or update.effective_chat.type != "private":
+        return
+    chat_id = update.effective_chat.id
+    replied = update.message.reply_to_message
+    if not replied:
+        await update.message.reply_text("Reply to the message you want to delete.")
+        return
+    success, err = await delete_message_safe(context.bot, chat_id, replied.message_id)
+    if success:
+        await delete_message_safe(context.bot, chat_id, update.message.message_id)
+    elif err == "too_old":
+        await update.message.reply_text("⚠️ That message is older than 48 hours — Telegram won't let me delete it.")
+    elif err == "already_gone":
+        await update.message.reply_text("ℹ️ Already deleted.")
+    else:
+        await update.message.reply_text(f"❌ Couldn't delete: {err}")
+
+
+async def handle_delete_last(update, context, n: int):
+    """Delete the last N bot messages in this chat."""
+    from modules.message_manager import get_recent_bot_messages, delete_message_safe
+    if update.effective_user.id != OWNER_CHAT_ID or update.effective_chat.type != "private":
+        return
+    n = max(1, min(n, 50))
+    chat_id = update.effective_chat.id
+    candidates = get_recent_bot_messages(chat_id, n)
+    if not candidates:
+        await update.message.reply_text("No recent bot messages to delete (or all are too old).")
+        return
+    deleted_count = 0
+    for entry in candidates:
+        success, _ = await delete_message_safe(context.bot, chat_id, entry["message_id"])
+        if success:
+            deleted_count += 1
+    await delete_message_safe(context.bot, chat_id, update.message.message_id)
+    confirmation = await update.message.reply_text(f"Deleted {deleted_count} message(s).")
+    await asyncio.sleep(5)
+    await delete_message_safe(context.bot, chat_id, confirmation.message_id)
+
+
+async def handle_schedule_delete(update, context, duration_seconds: int, target_message_id: int = None):
+    """Schedule a deletion for a specific message."""
+    from modules.message_manager import save_scheduled_deletion, delete_message_safe, MAX_DELETE_AGE_HOURS
+    import uuid
+    if update.effective_user.id != OWNER_CHAT_ID or update.effective_chat.type != "private":
+        return
+    if duration_seconds > MAX_DELETE_AGE_HOURS * 3600:
+        await update.message.reply_text(
+            "⚠️ Can't schedule that far out — Telegram only allows deletion within 48 hours of a message being sent."
+        )
+        return
+    chat_id = update.effective_chat.id
+    if target_message_id is None:
+        replied = update.message.reply_to_message
+        if not replied:
+            await update.message.reply_text("Reply to the message you want to auto-delete.")
+            return
+        target_message_id = replied.message_id
+    deletion_id = f"del_{uuid.uuid4().hex[:8]}"
+    fire_at = datetime.now() + timedelta(seconds=duration_seconds)
+    save_scheduled_deletion(deletion_id, chat_id, target_message_id, fire_at)
+    scheduler = context.application.bot_data.get("scheduler")
+    if scheduler:
+        scheduler.add_job(
+            fire_scheduled_deletion,
+            "date",
+            run_date=fire_at,
+            args=[context.bot, deletion_id],
+            id=deletion_id,
+            replace_existing=True,
+        )
+    if duration_seconds < 3600:
+        when = f"in {duration_seconds // 60} min"
+    elif duration_seconds < 86400:
+        when = f"in {duration_seconds // 3600}h {(duration_seconds % 3600) // 60}m"
+    else:
+        when = f"at {fire_at.strftime('%d %b %H:%M')}"
+    confirmation = await update.message.reply_text(f"Will delete {when}")
+    await asyncio.sleep(10)
+    await delete_message_safe(context.bot, chat_id, confirmation.message_id)
+
+
+async def fire_scheduled_deletion(bot, deletion_id: str):
+    """APScheduler callback — fires at the scheduled time."""
+    from modules.message_manager import get_scheduled_deletion, remove_scheduled_deletion, delete_message_safe
+    entry = get_scheduled_deletion(deletion_id)
+    if not entry:
+        return
+    await delete_message_safe(bot, entry["chat_id"], entry["message_id"])
+    remove_scheduled_deletion(deletion_id)
+    logger.info(f"Scheduled deletion fired: {deletion_id} msg={entry['message_id']}")
+
+
 async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Discard any stale full_context from user_data
     context.user_data.pop("full_context", None)
@@ -1032,6 +1158,34 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 replied_text = replied_text[:400] + "..."
             text = f'[Replying to: "{replied_text}"]\n\n{original_text}'
 
+    # ── AUTO-DELETE MODIFIER PRE-CHECK ────────
+    # Detects "and auto-delete after 30 min" suffix before intent parsing
+    auto_delete_seconds = None
+    _AUTO_DELETE_PATS = [
+        r'\s*(?:and\s+)?(?:auto[- ]?delete|delete it|self[- ]?destruct)\s+(?:after\s+|in\s+)([\d]+\s*(?:s|sec|seconds?|m|min|minutes?|h|hr|hours?|d|days?))',
+        r'\s*([\d]+\s*(?:秒|分钟|分鐘|小时|小時|天))[后後]\s*(?:自动|自動)?(?:删除|刪除)',
+    ]
+    for _pat in _AUTO_DELETE_PATS:
+        _m = re.search(_pat, original_text, re.IGNORECASE)
+        if _m:
+            _secs = parse_duration_to_seconds(_m.group(1))
+            if _secs:
+                auto_delete_seconds = _secs
+                clean_orig = re.sub(_pat, "", original_text, flags=re.IGNORECASE).strip()
+                if update.message.reply_to_message:
+                    _replied = update.message.reply_to_message
+                    _rt = (_replied.text or _replied.caption or "").strip()
+                    if _rt:
+                        if len(_rt) > 400:
+                            _rt = _rt[:400] + "..."
+                        text = f'[Replying to: "{_rt}"]\n\n{clean_orig}'
+                    else:
+                        text = clean_orig
+                else:
+                    text = clean_orig
+                break
+    # ──────────────────────────────────────────
+
     # ── ACTIVITY COMPLETION DETECTION ─────────
     activity_info = detect_activity_completion(text)
     if activity_info:
@@ -1046,12 +1200,33 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
     logger.info(f"DEBUG intent: {intent} | data: {intent_data}")
 
     # Override: if user is asking a question about schedules, use summary
-    question_words = ["what will", "what are", "tell me", "summary", 
+    question_words = ["what will", "what are", "tell me", "summary",
                       "summarize", "explain", "describe", "what have",
                       "what did", "what do", "remind me", "what's scheduled"]
     if intent == "schedule_list" and any(w in text.lower() for w in question_words):
         intent = "schedule_summary"
         logger.info(f"DEBUG intent overridden to: schedule_summary")
+
+    # ── DELETION INTENT ROUTING ───────────────
+    if intent == "message_delete_reply":
+        await handle_delete_reply(update, context)
+        return
+    if intent == "message_delete_last":
+        n = int(intent_data.get("target_count") or 1)
+        await handle_delete_last(update, context, n)
+        return
+    if intent == "message_schedule_delete_reply":
+        dur = intent_data.get("duration_seconds")
+        if not dur:
+            await update.message.reply_text("Tell me how long, e.g. 'delete in 30 minutes'.")
+            return
+        await handle_schedule_delete(update, context, int(dur))
+        return
+    if intent == "message_delete_cancel":
+        await update.message.reply_text("Use /pendingdeletes to see and manage pending deletions.")
+        return
+    # message_auto_delete_request is handled after the response is sent (see else branch)
+    # ──────────────────────────────────────────
 
     if intent == "schedule_add":
         time_str  = intent_data.get("time") or "08:00"
@@ -1557,7 +1732,23 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 history_text=original_text,
             )
 
-        await update.message.reply_text(reply)
+        from modules.message_manager import track_bot_message, MAX_DELETE_AGE_HOURS
+        chat_id = update.effective_chat.id
+
+        if auto_delete_seconds:
+            if auto_delete_seconds > MAX_DELETE_AGE_HOURS * 3600:
+                await update.message.reply_text("⚠️ Auto-delete must be within 48 hours.")
+                return
+            if auto_delete_seconds < 3600:
+                dur_str = f"{auto_delete_seconds // 60} min"
+            else:
+                dur_str = f"{auto_delete_seconds // 3600}h"
+            sent_msg = await update.message.reply_text(reply + f"\n\nSelf-destructs in {dur_str}")
+            track_bot_message(chat_id, sent_msg.message_id)
+            await handle_schedule_delete(update, context, auto_delete_seconds, target_message_id=sent_msg.message_id)
+        else:
+            sent_msg = await update.message.reply_text(reply)
+            track_bot_message(chat_id, sent_msg.message_id)
 
 async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return

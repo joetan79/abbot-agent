@@ -24,6 +24,7 @@ from modules.agent import (
     handle_owner_message, run_scheduled_job,
     cmd_tasks, cmd_schedules, cmd_memory, cmd_news, cmd_xfeed, cmd_report, cmd_skills,
     cmd_memories, cmd_forget,
+    handle_delete_last, fire_scheduled_deletion,
 )
 
 logging.basicConfig(
@@ -225,6 +226,52 @@ def restore_reminders(scheduler, bot):
     logger.info(
         f"Reminders restored={restored} "
         f"expired={expired}")
+
+
+def restore_scheduled_deletions(application, scheduler):
+    """Re-queue pending deletions after bot restart."""
+    from modules.message_manager import get_all_scheduled_deletions, remove_scheduled_deletion
+    now = datetime.now()
+    all_deletions = get_all_scheduled_deletions()
+    restored = 0
+    fired_late = 0
+    cleaned = 0
+    for deletion_id, entry in list(all_deletions.items()):
+        try:
+            fire_at = datetime.fromisoformat(entry["fire_at"])
+        except Exception:
+            remove_scheduled_deletion(deletion_id)
+            cleaned += 1
+            continue
+        try:
+            age_hours = (now - datetime.fromisoformat(entry["created_at"])).total_seconds() / 3600
+        except Exception:
+            age_hours = 0
+        if age_hours > 48:
+            remove_scheduled_deletion(deletion_id)
+            cleaned += 1
+            continue
+        if fire_at <= now:
+            scheduler.add_job(
+                fire_scheduled_deletion,
+                "date",
+                run_date=now + timedelta(seconds=2),
+                args=[application.bot, deletion_id],
+                id=deletion_id,
+                replace_existing=True,
+            )
+            fired_late += 1
+        else:
+            scheduler.add_job(
+                fire_scheduled_deletion,
+                "date",
+                run_date=fire_at,
+                args=[application.bot, deletion_id],
+                id=deletion_id,
+                replace_existing=True,
+            )
+            restored += 1
+    logger.info(f"Deletions restored={restored} fired_late={fired_late} cleaned={cleaned}")
 
 
 def restore_schedules(scheduler, bot):
@@ -480,6 +527,33 @@ async def cmd_windows(
     await update.message.reply_text(
         "\n".join(lines))
 
+async def cmd_delete_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from modules.utils import OWNER_CHAT_ID
+    if update.effective_user.id != OWNER_CHAT_ID or update.effective_chat.type != "private":
+        return
+    try:
+        n = int(context.args[0]) if context.args else 1
+    except (ValueError, IndexError):
+        n = 1
+    await handle_delete_last(update, context, n)
+
+
+async def cmd_pending_deletes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from modules.utils import OWNER_CHAT_ID
+    from modules.message_manager import get_all_scheduled_deletions
+    if update.effective_user.id != OWNER_CHAT_ID or update.effective_chat.type != "private":
+        return
+    data = get_all_scheduled_deletions()
+    if not data:
+        await update.message.reply_text("No pending deletions.")
+        return
+    lines = ["Pending deletions:"]
+    for did, entry in sorted(data.items(), key=lambda kv: kv[1]["fire_at"]):
+        fire_at = datetime.fromisoformat(entry["fire_at"]).strftime("%d %b %H:%M")
+        lines.append(f"• {did}: msg {entry['message_id']} → {fire_at}")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def error_handler(
         update: object,
         context: ContextTypes.DEFAULT_TYPE):
@@ -502,6 +576,7 @@ async def main():
     app.bot_data["scheduler"] = scheduler
     restore_schedules(scheduler, app.bot)
     restore_reminders(scheduler, app.bot)
+    restore_scheduled_deletions(app, scheduler)
     scheduler.add_job(
         clear_old_published, "cron",
         hour=3, minute=0,
@@ -533,6 +608,8 @@ async def main():
     app.add_handler(CommandHandler("reminders",      cmd_reminders))
     app.add_handler(CommandHandler("cancelreminder", cmd_cancel_reminder))
     app.add_handler(CommandHandler("windows",        cmd_windows))
+    app.add_handler(CommandHandler("deletelast",     cmd_delete_last))
+    app.add_handler(CommandHandler("pendingdeletes", cmd_pending_deletes))
     app.add_error_handler(error_handler)
     await app.bot.set_my_commands([
         BotCommand("start",          "Welcome & help"),
@@ -551,6 +628,8 @@ async def main():
         BotCommand("reminders",      "View pending reminders"),
         BotCommand("cancelreminder", "Cancel a reminder"),
         BotCommand("windows",        "View time windows"),
+        BotCommand("deletelast",     "Delete last N bot messages (owner)"),
+        BotCommand("pendingdeletes", "View pending scheduled deletions"),
     ])
     logger.info("🤖 AgentBot is running...")
     await app.run_polling(allowed_updates=Update.ALL_TYPES)

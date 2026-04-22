@@ -92,6 +92,27 @@ def memory_set_categorized(key: str, value):
     )
 
 
+def parse_duration_to_seconds(text: str) -> int | None:
+    """Parse strings like '30 minutes', '2 hours', '1 day' into seconds.
+    Returns None if not parseable. Handles Chinese units too."""
+    text = text.lower().strip()
+    patterns = [
+        (r'(\d+)\s*(?:s|sec|second|seconds)', 1),
+        (r'(\d+)\s*(?:m|min|minute|minutes)', 60),
+        (r'(\d+)\s*(?:h|hr|hour|hours)', 3600),
+        (r'(\d+)\s*(?:d|day|days)', 86400),
+        (r'(\d+)\s*秒', 1),
+        (r'(\d+)\s*分(?:钟|鐘)?', 60),
+        (r'(\d+)\s*(?:小时|小時|时|時)', 3600),
+        (r'(\d+)\s*天', 86400),
+    ]
+    for pat, mult in patterns:
+        m = re.search(pat, text)
+        if m:
+            return int(m.group(1)) * mult
+    return None
+
+
 def clean_response(text: str) -> str:
     # Remove citation tags like <cite index="0-1">...</cite>
     text = re.sub(r'<cite[^>]*>', '', text)
