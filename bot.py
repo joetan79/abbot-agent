@@ -12,6 +12,7 @@ from telegram.ext import (
     MessageHandler, ContextTypes, filters,
 )
 from modules.utils import handle_photo
+from modules import gmail_monitor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from modules.utils import (
@@ -583,8 +584,18 @@ async def main():
         id="daily_published_cleanup",
         replace_existing=True,
     )
+    scheduler.add_job(
+        gmail_monitor.check_new_emails,
+        "interval",
+        minutes=30,
+        args=[app.bot],
+        id="gmail_monitor",
+        replace_existing=True,
+        next_run_time=datetime.now(timezone.utc),
+    )
     scheduler.start()
     logger.info("⏰ Scheduler started")
+    logger.info("📧 Gmail monitor scheduled every 30 minutes")
     logger.info("🗑️ Daily published_articles cleanup scheduled at 03:00")
     app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("ask",       cmd_ask))
