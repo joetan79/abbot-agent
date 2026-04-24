@@ -9,6 +9,7 @@ import logging
 import hashlib
 from datetime import datetime, timezone, timedelta
 from modules.utils import get_cached_news, set_cached_news, is_article_published, mark_article_published
+from modules.rssfeed import clean_text
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +110,8 @@ def _fetch_from_instance(instance, hours, count):
                 if not link:
                     continue
 
-                title = getattr(entry, "title", "") or ""
-                summary = getattr(entry, "summary", title) or title
+                title = clean_text(getattr(entry, "title", "") or "")
+                summary = clean_text(getattr(entry, "summary", title) or title)
                 if title.startswith("RT @"):
                     continue
 
@@ -341,7 +342,7 @@ def parse_claude_news_response(raw, max_age_days=3):
         if not title_m:
             continue
 
-        raw_title = title_m.group(1).strip()
+        raw_title = clean_text(title_m.group(1).strip())
 
         if is_junk(raw_title):
             continue
@@ -393,7 +394,7 @@ def parse_claude_news_response(raw, max_age_days=3):
         seen_titles.append(title_lower)
 
         url     = url_m.group(1).strip() if url_m else ""
-        summary = why_m.group(1).strip()[:250] if why_m else ""
+        summary = clean_text(why_m.group(1).strip())[:250] if why_m else ""
         pub_date = today.strftime("%Y-%m-%d") if not date_str else (
             date_str[:10] if len(date_str) >= 10 else today.strftime("%Y-%m-%d")
         )

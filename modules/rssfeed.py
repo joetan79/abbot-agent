@@ -4,6 +4,7 @@ Free, no API key, real-time updates.
 """
 
 import re
+import html
 import time
 import email.utils
 import feedparser
@@ -11,6 +12,16 @@ import logging
 import httpx
 from datetime import datetime, timezone, timedelta
 from modules.utils import is_article_published, mark_article_published
+
+
+def clean_text(text: str) -> str:
+    """Decode HTML entities and strip tags/whitespace from RSS text."""
+    if not text:
+        return ""
+    text = html.unescape(text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def extract_og_image(url: str) -> str | None:
@@ -482,7 +493,7 @@ def parse_article(item,
 
     if not title or title == "[Removed]":
         return None
-    title = title.strip()
+    title = clean_text(title)
 
     # Get summary - check multiple fields
     summary = ""
@@ -504,8 +515,7 @@ def parse_article(item,
     if not summary:
         return None
 
-    summary = re.sub(r"<[^>]+>", "", summary)
-    summary = re.sub(r"\s+", " ", summary).strip()
+    summary = clean_text(summary)
     summary = summary[:500]
 
     # Get URL - check ALL possible field names
