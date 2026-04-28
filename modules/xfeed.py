@@ -64,6 +64,18 @@ X_KEYWORDS = [
 
 X_CACHE_KEY = "x_feed_cache"
 
+# Aggregator/round-up sites that republish others' news — skip entirely.
+# Claude should surface the original primary source instead.
+LOW_QUALITY_SOURCES = {
+    'techstartups.com',
+    'dailysabah.com',
+    'thenextweb.com',
+    'analyticsinsight.net',
+    'aitools.fyi',
+    'synced.global',
+    'marktechpost.com',
+}
+
 
 def _build_feed_urls(instance):
     urls = []
@@ -219,6 +231,7 @@ STRICT RULES:
 - Do NOT include general overviews or roundups from previous weeks
 - Do NOT make up or hallucinate URLs — only use URLs you actually found
 - If you find fewer than 3 genuine recent items, return only what is real
+- Always link to the original source article, not aggregator or round-up pages. Do not use techstartups.com, dailysabah.com, or similar tech news round-up sites as sources.
 
 For each item found, use EXACTLY this format:
 SOURCE: (lab or company name only)
@@ -399,6 +412,14 @@ def parse_claude_news_response(raw, max_age_days=3):
             date_str[:10] if len(date_str) >= 10 else today.strftime("%Y-%m-%d")
         )
 
+        # Skip low-quality aggregator domains
+        if url:
+            from urllib.parse import urlparse as _urlparse
+            url_domain = _urlparse(url).netloc.lower().lstrip('www.')
+            if url_domain in LOW_QUALITY_SOURCES:
+                logger.debug(f"xfeed: skipping low-quality source {url_domain}: {title[:40]}")
+                continue
+
         posts.append({
             "title":     title[:200],
             "summary":   summary,
@@ -406,5 +427,21 @@ def parse_claude_news_response(raw, max_age_days=3):
             "source":    source,
             "published": pub_date,
         })
+
+    # If multiple items share the same source_url, append #item-N fragments so
+    # each passes is_article_published() dedup independently.
+    seen_urls: dict = {}
+    for post in posts:
+        raw_url = post["url"]
+        if not raw_url:
+            continue
+        seen_urls[raw_url] = seen_urls.get(raw_url, 0) + 1
+
+    url_counters: dict = {}
+    for post in posts:
+        raw_url = post["url"]
+        if raw_url and seen_urls.get(raw_url, 1) > 1:
+            url_counters[raw_url] = url_counters.get(raw_url, 0) + 1
+            post["url"] = f"{raw_url}#item-{url_counters[raw_url]}"
 
     return posts[:10]
