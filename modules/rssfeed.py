@@ -81,6 +81,7 @@ BLOCKED_IMAGE_DOMAINS = [
     "economist.com",
     "businessinsider.com",
     "seekingalpha.com",
+    "zdnet.com",
 ]
 
 
