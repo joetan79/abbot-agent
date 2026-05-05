@@ -19,6 +19,7 @@ SKILL_PRIORITY = [
     "crypto_reporting",      # domain specific
     "weather_reporting",     # domain specific
     "study_assistant",       # domain specific
+    "xfeed_quality",         # xfeed source/format rules
 ]
 
 
@@ -59,6 +60,11 @@ def load_skills(scope: str = "all") -> str:
             "communication_style",
             "response_style",
             "weather_reporting",
+        ],
+        "xfeed": [
+            "communication_style",
+            "response_style",
+            "xfeed_quality",
         ],
         "all": SKILL_PRIORITY,
     }

@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 # Model selection
 MODEL_FAST    = "claude-haiku-4-5-20251001"   # Simple tasks
 MODEL_SMART   = "claude-sonnet-4-5"           # Complex tasks
-MODEL_PREMIUM = "claude-sonnet-4-20250514"     # AI Pulse & Updates (xfeed)
+MODEL_PREMIUM = "claude-haiku-4-5-20251001"     # AI Pulse & Updates (xfeed)
 
 # ── Memory Categories ─────────────────────────────────────────────────────────
 MEMORY_CATEGORIES = {

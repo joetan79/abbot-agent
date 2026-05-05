@@ -631,6 +631,16 @@ async def run_scheduled_job(bot, job_id: str, action: str):
         msg = clean_response(msg)
         text = f"Daily Report\n\n{msg}"
 
+    elif action == "ai_quiz":
+        from modules.quiz import send_quiz
+        await send_quiz(bot, "ai")
+        return
+
+    elif action == "python_quiz":
+        from modules.quiz import send_quiz
+        await send_quiz(bot, "python")
+        return
+
     else:
         # Generic scheduled action — use web search for any live data needed
         system = (
@@ -1193,6 +1203,17 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             update, context, activity_info)
         return
     # ──────────────────────────────────────────
+
+    # Quiz answer intercept — check if any quiz is pending and text might be a response
+    try:
+        from modules.quiz import load_quiz_state, handle_quiz_response
+        _quiz_state = load_quiz_state()
+        if _quiz_state["ai_quiz"]["pending"]:
+            await handle_quiz_response(context.bot, text, "ai")
+        if _quiz_state["python_quiz"]["pending"]:
+            await handle_quiz_response(context.bot, text, "python")
+    except Exception as _qe:
+        logger.error(f"Quiz intercept error: {_qe}")
 
     # Continue with intent parsing...
     intent_data = parse_intent(text)

@@ -9,6 +9,7 @@ import logging
 import hashlib
 from datetime import datetime, timezone, timedelta
 from modules.utils import get_cached_news, set_cached_news, is_article_published, mark_article_published
+from modules.skills_loader import load_skills
 from modules.rssfeed import clean_text
 
 logger = logging.getLogger(__name__)
@@ -220,7 +221,9 @@ def get_xfeed_search_prompt():
     from datetime import datetime, timezone, timedelta
     today_str = datetime.now(timezone.utc).strftime("%B %d, %Y")
     yesterday_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%B %d, %Y")
-    return f"""Today is {today_str}. Search the web for AI news published TODAY or YESTERDAY ({yesterday_str}) only.
+    skills = load_skills("xfeed")
+    prefix = skills + "\n\n" if skills else ""
+    return f"""{prefix}Today is {today_str}. Search the web for AI news published TODAY or YESTERDAY ({yesterday_str}) only.
 
 Find announcements published on {today_str} or {yesterday_str} from:
 OpenAI, Anthropic, Google DeepMind, Meta AI, Microsoft AI, NVIDIA, DeepSeek, Alibaba Qwen, Mistral AI, xAI, Hugging Face, Cohere, Stability AI, TII UAE, Samsung AI, Baidu.
