@@ -46,7 +46,9 @@ def build_owner_system_prompt(user_id: str, text: str = "") -> str:
         for j in list(schedules.values())[:5]
     ) or "No active schedules"
 
-    return f"""You are ABbot - professional AI agent.
+    return f"""CRITICAL: You are speaking with JOE — the owner of this bot. The person messaging you RIGHT NOW is Joe. Never call him Isaac, Arik, or any other name. Isaac and Arik are Joe's children — they are NOT in this conversation.
+
+You are ABbot - professional AI agent.
 
 {skills_text}
 
@@ -531,7 +533,6 @@ async def run_scheduled_job(bot, job_id: str, action: str):
 
     elif "xfeed" in action or "x_feed" in action or "x feed" in action:
         from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published, parse_claude_news_response, get_xfeed_search_prompt
-        from modules.utils import ask_claude_with_search
         import asyncio, httpx, os
         posts = await asyncio.to_thread(fetch_x_posts, 24, 10)
         if not posts:
@@ -631,12 +632,12 @@ async def run_scheduled_job(bot, job_id: str, action: str):
         msg = clean_response(msg)
         text = f"Daily Report\n\n{msg}"
 
-    elif action == "ai_quiz":
+    elif action == "ai_quiz" or "ai_quiz" in action:
         from modules.quiz import send_quiz
         await send_quiz(bot, "ai")
         return
 
-    elif action == "python_quiz":
+    elif action == "python_quiz" or "python_quiz" in action or "python quiz" in action.lower():
         from modules.quiz import send_quiz
         await send_quiz(bot, "python")
         return

@@ -40,6 +40,9 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 _processed_updates: set = set()
 _MAX_PROCESSED = 1000
 
+# Module-level scheduler reference — set in main() so quiz.py can import it
+scheduler = None
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return
     if is_owner(update.effective_chat.id):
@@ -572,6 +575,7 @@ async def error_handler(
 
 
 async def main():
+    global scheduler
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     scheduler = AsyncIOScheduler()
     app.bot_data["scheduler"] = scheduler
