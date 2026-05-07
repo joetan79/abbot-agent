@@ -28,10 +28,12 @@ from .skills_loader import load_skills, list_skills, get_skill_token_estimate
 
 def build_owner_system_prompt(user_id: str, text: str = "") -> str:
     """Build a rich, context-aware system prompt for the owner."""
+    import pytz
     tasks = task_list()
     schedules = schedule_load_all()
     recent_history = history_summary(user_id)
-    now = datetime.now().strftime("%A, %d %B %Y %H:%M")
+    now_utc8 = datetime.now(pytz.timezone('Asia/Kuala_Lumpur'))
+    now = now_utc8.strftime("%A, %d %B %Y %H:%M (UTC+8)")
     skills_text = load_skills(scope="core")
 
     # Get core preferences only
@@ -55,6 +57,7 @@ You are ABbot - professional AI agent.
 {core_prefs}
 
 DATE/TIME: {now}
+When Joe uses words like "today", "yesterday", "now", "this morning", "last night", always resolve them relative to the DATE/TIME above. Never use training knowledge to guess the date.
 
 PENDING TASKS:
 {tasks_text}
@@ -1205,14 +1208,17 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     # ──────────────────────────────────────────
 
-    # Quiz answer intercept — check if any quiz is pending and text might be a response
+    # Quiz answer intercept — handle pending responses AND resend requests
     try:
         from modules.quiz import load_quiz_state, handle_quiz_response
         _quiz_state = load_quiz_state()
-        if _quiz_state["ai_quiz"]["pending"]:
-            await handle_quiz_response(context.bot, text, "ai")
-        if _quiz_state["python_quiz"]["pending"]:
-            await handle_quiz_response(context.bot, text, "python")
+        _resend_kws = ["resend", "resend answer", "show answer", "last answer",
+                       "previous answer", "what was the answer", "answer again"]
+        _text_lower = text.lower()
+        _wants_resend = any(kw in _text_lower for kw in _resend_kws)
+        for _qtype, _qkey in [("ai", "ai_quiz"), ("python", "python_quiz")]:
+            if _quiz_state[_qkey]["pending"] or _wants_resend:
+                await handle_quiz_response(context.bot, text, _qtype)
     except Exception as _qe:
         logger.error(f"Quiz intercept error: {_qe}")
 

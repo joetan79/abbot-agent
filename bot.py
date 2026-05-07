@@ -40,8 +40,9 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 _processed_updates: set = set()
 _MAX_PROCESSED = 1000
 
-# Module-level scheduler reference — set in main() so quiz.py can import it
+# Module-level references set in main() — accessed via sys.modules['__main__']
 scheduler = None
+application = None
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return
@@ -575,13 +576,16 @@ async def error_handler(
 
 
 async def main():
-    global scheduler
+    global scheduler, application
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = app
     scheduler = AsyncIOScheduler()
     app.bot_data["scheduler"] = scheduler
     restore_schedules(scheduler, app.bot)
     restore_reminders(scheduler, app.bot)
     restore_scheduled_deletions(app, scheduler)
+    from modules.quiz import restore_quiz_timeouts
+    restore_quiz_timeouts(scheduler, app.bot)
     scheduler.add_job(
         clear_old_published, "cron",
         hour=3, minute=0,
