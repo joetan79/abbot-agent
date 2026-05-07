@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+import random
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -14,6 +16,8 @@ DEFAULT_STATE = {
         "answer": "",
         "options": {},
         "explanation": "",
+        "questions": [],
+        "current_index": 0,
         "sent_at": None,
         "reminder_job_id": None
     },
@@ -23,6 +27,8 @@ DEFAULT_STATE = {
         "answer": "",
         "options": {},
         "explanation": "",
+        "questions": [],
+        "current_index": 0,
         "type": "mcq",
         "sent_at": None,
         "reminder_job_id": None,
@@ -116,11 +122,13 @@ Respond ONLY in this exact JSON format with no markdown, no code blocks, no extr
             logger.error(f"Python coding retry failed: {e2}")
             return None
 
-def format_mcq_message(quiz_data, quiz_type):
+def format_mcq_message(quiz_data, quiz_type, index=None, total=None):
     emoji = "🧠" if quiz_type == "ai" else "🐍"
     label = "AI Knowledge Quiz" if quiz_type == "ai" else "Python Quiz"
     opts = quiz_data.get("options", {})
+    prefix = f"❓ Question {index}/{total}\n\n" if index is not None and total is not None else ""
     return (
+        f"{prefix}"
         f"{emoji} *{label}*\n\n"
         f"{quiz_data['question']}\n\n"
         f"A) {opts.get('A', '')}\n"
@@ -130,8 +138,10 @@ def format_mcq_message(quiz_data, quiz_type):
         f"Reply with A, B, C, or D within 30 minutes!"
     )
 
-def format_coding_message(quiz_data):
+def format_coding_message(quiz_data, index=None, total=None):
+    prefix = f"❓ Question {index}/{total}\n\n" if index is not None and total is not None else ""
     return (
+        f"{prefix}"
         f"🐍 *Python Coding Challenge*\n\n"
         f"{quiz_data['question']}\n\n"
         f"Write your solution and reply within 30 minutes!\n"
@@ -166,36 +176,37 @@ async def send_quiz(bot, quiz_type):
     quiz_key = "ai_quiz" if quiz_type == "ai" else "python_quiz"
     owner_chat_id = _get_owner_chat_id()
 
-    # If previous quiz still pending, send its answer first
+    # If previous quiz still pending, skip — the 30-min timeout job handles it
     if state[quiz_key]["pending"]:
-        try:
-            await send_quiz_answer(bot, quiz_type, is_timeout=True)
-        except Exception as e:
-            logger.error(f"Failed to send overdue quiz answer: {e}")
-        state = load_quiz_state()
+        logger.info(f"Quiz {quiz_type} still pending, skipping scheduled send")
+        return
 
-    # Generate quiz
-    quiz_data = None
+    count = random.randint(3, 5)
+    questions = []
+
     if quiz_type == "ai":
-        quiz_data = generate_ai_quiz()
-        if quiz_data:
-            quiz_data["type"] = "mcq"
-            msg = format_mcq_message(quiz_data, "ai")
-    else:
-        day_counter = state[quiz_key].get("day_counter", 0)
-        if day_counter % 3 == 0:
-            quiz_data = generate_python_coding()
-            if quiz_data:
-                quiz_data["type"] = "coding"
-                msg = format_coding_message(quiz_data)
-        else:
-            quiz_data = generate_python_mcq()
+        for _ in range(count):
+            quiz_data = generate_ai_quiz()
             if quiz_data:
                 quiz_data["type"] = "mcq"
-                msg = format_mcq_message(quiz_data, "python")
+                questions.append(quiz_data)
+    else:
+        day_counter = state[quiz_key].get("day_counter", 0)
+        batch_type = "coding" if day_counter % 3 == 0 else "mcq"
         state[quiz_key]["day_counter"] = day_counter + 1
+        for _ in range(count):
+            if batch_type == "coding":
+                quiz_data = generate_python_coding()
+                if quiz_data:
+                    quiz_data["type"] = "coding"
+                    questions.append(quiz_data)
+            else:
+                quiz_data = generate_python_mcq()
+                if quiz_data:
+                    quiz_data["type"] = "mcq"
+                    questions.append(quiz_data)
 
-    if not quiz_data:
+    if not questions:
         try:
             await bot.send_message(chat_id=owner_chat_id, text="⚠️ Failed to generate quiz. Will retry next schedule.")
         except Exception:
@@ -203,15 +214,23 @@ async def send_quiz(bot, quiz_type):
         save_quiz_state(state)
         return
 
-    # Send to Telegram
-    try:
-        await bot.send_message(chat_id=owner_chat_id, text=msg, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Failed to send quiz message: {e}")
-        save_quiz_state(state)
-        return
+    total = len(questions)
 
-    # Schedule 30-min answer job
+    for i, q in enumerate(questions, 1):
+        q_type = q.get("type", "mcq")
+        if q_type == "coding":
+            msg = format_coding_message(q, index=i, total=total)
+        else:
+            qt = "ai" if quiz_type == "ai" else "python"
+            msg = format_mcq_message(q, qt, index=i, total=total)
+        try:
+            await bot.send_message(chat_id=owner_chat_id, text=msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Failed to send quiz question {i}: {e}")
+        if i < total:
+            await asyncio.sleep(2)
+
+    # Schedule 30-min answer job for the entire batch
     fire_time = datetime.now() + timedelta(minutes=30)
     job_id = f"quiz_answer_{quiz_type}_{int(fire_time.timestamp())}"
     try:
@@ -226,13 +245,10 @@ async def send_quiz(bot, quiz_type):
         logger.error(f"Failed to schedule quiz answer job: {e}")
         job_id = None
 
-    # Update state
     state[quiz_key]["pending"] = True
-    state[quiz_key]["question"] = quiz_data.get("question", "")
-    state[quiz_key]["answer"] = quiz_data.get("answer", "")
-    state[quiz_key]["options"] = quiz_data.get("options", {})
-    state[quiz_key]["explanation"] = quiz_data.get("explanation", "")
-    state[quiz_key]["type"] = quiz_data.get("type", "mcq")
+    state[quiz_key]["questions"] = questions
+    state[quiz_key]["current_index"] = 0
+    state[quiz_key]["answer"] = ""
     state[quiz_key]["sent_at"] = datetime.now().isoformat()
     state[quiz_key]["reminder_job_id"] = job_id
     save_quiz_state(state)
@@ -245,13 +261,34 @@ async def send_quiz_answer(bot, quiz_type, is_timeout=True):
     if not state[quiz_key]["pending"]:
         return
 
-    msg = format_answer_message(state[quiz_key], quiz_type, is_timeout=is_timeout)
+    questions = state[quiz_key].get("questions", [])
+    current_index = state[quiz_key].get("current_index", 0)
+
+    if questions and current_index < len(questions):
+        header = "⏰ Time's up! Here are the answers:" if is_timeout else "📖 Here are the answers:"
+        lines = [header, ""]
+        for i, q in enumerate(questions[current_index:], current_index + 1):
+            q_type = q.get("type", "mcq")
+            if q_type == "coding":
+                lines.append(f"Q{i}) Solution:")
+                lines.append(f"```python\n{q['answer']}\n```")
+                lines.append(f"💡 {q.get('explanation', '')}")
+            else:
+                answer_key = q.get("answer", "")
+                opts = q.get("options", {})
+                answer_text = opts.get(answer_key, "")
+                lines.append(f"Q{i}) {answer_key}) {answer_text}")
+                lines.append(f"💡 {q.get('explanation', '')}")
+            lines.append("")
+        msg = "\n".join(lines).strip()
+    else:
+        msg = format_answer_message(state[quiz_key], quiz_type, is_timeout=is_timeout)
+
     try:
         await bot.send_message(chat_id=owner_chat_id, text=msg, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Failed to send quiz answer: {e}")
 
-    # Cancel scheduler job if still pending
     job_id = state[quiz_key].get("reminder_job_id")
     if job_id:
         try:
@@ -272,40 +309,82 @@ async def handle_quiz_response(bot, text, quiz_type):
         return
 
     owner_chat_id = _get_owner_chat_id()
-    q_type = state[quiz_key].get("type", "mcq")
     text_stripped = text.strip()
 
-    # Show answer keywords
     show_keywords = ["answer", "skip", "show answer", "show", "give up"]
     if text_stripped.lower() in show_keywords:
         await send_quiz_answer(bot, quiz_type, is_timeout=False)
         return
 
+    questions = state[quiz_key].get("questions", [])
+    current_index = state[quiz_key].get("current_index", 0)
+
+    # Fallback for old state format without questions list
+    if not questions:
+        q_type = state[quiz_key].get("type", "mcq")
+        if q_type == "mcq":
+            user_answer = text_stripped.upper()[0] if text_stripped else ""
+            correct = state[quiz_key].get("answer", "").upper()
+            if user_answer in ["A", "B", "C", "D"]:
+                if user_answer == correct:
+                    explanation = state[quiz_key].get("explanation", "")
+                    reply = f"✅ Correct! 🎉\n\n💡 {explanation}"
+                    try:
+                        await bot.send_message(chat_id=owner_chat_id, text=reply)
+                    except Exception as e:
+                        logger.error(f"Failed to send correct answer response: {e}")
+                    job_id = state[quiz_key].get("reminder_job_id")
+                    if job_id:
+                        try:
+                            from bot import scheduler
+                            scheduler.remove_job(job_id)
+                        except Exception:
+                            pass
+                    state[quiz_key]["pending"] = False
+                    state[quiz_key]["reminder_job_id"] = None
+                    save_quiz_state(state)
+                else:
+                    try:
+                        await bot.send_message(chat_id=owner_chat_id, text="❌ Wrong answer! Try again or wait for the answer in 30 minutes.")
+                    except Exception as e:
+                        logger.error(f"Failed to send wrong answer response: {e}")
+        return
+
+    if current_index >= len(questions):
+        return
+
+    current_q = questions[current_index]
+    q_type = current_q.get("type", "mcq")
+    total = len(questions)
+
     if q_type == "mcq":
         user_answer = text_stripped.upper()[0] if text_stripped else ""
-        correct = state[quiz_key].get("answer", "").upper()
+        correct = current_q.get("answer", "").upper()
         if user_answer in ["A", "B", "C", "D"]:
             if user_answer == correct:
-                explanation = state[quiz_key].get("explanation", "")
-                reply = f"✅ Correct! 🎉\n\n💡 {explanation}"
+                explanation = current_q.get("explanation", "")
+                n = current_index + 1
+                reply = f"✅ Q{n} Correct! 💡 {explanation}"
                 try:
                     await bot.send_message(chat_id=owner_chat_id, text=reply)
                 except Exception as e:
                     logger.error(f"Failed to send correct answer response: {e}")
-                # Cancel job
-                job_id = state[quiz_key].get("reminder_job_id")
-                if job_id:
-                    try:
-                        from bot import scheduler
-                        scheduler.remove_job(job_id)
-                    except Exception:
-                        pass
-                state[quiz_key]["pending"] = False
-                state[quiz_key]["reminder_job_id"] = None
+                current_index += 1
+                state[quiz_key]["current_index"] = current_index
+                if current_index >= total:
+                    job_id = state[quiz_key].get("reminder_job_id")
+                    if job_id:
+                        try:
+                            from bot import scheduler
+                            scheduler.remove_job(job_id)
+                        except Exception:
+                            pass
+                    state[quiz_key]["pending"] = False
+                    state[quiz_key]["reminder_job_id"] = None
                 save_quiz_state(state)
             else:
                 try:
-                    await bot.send_message(chat_id=owner_chat_id, text="❌ Wrong answer! Try again or wait for the answer in 30 minutes.")
+                    await bot.send_message(chat_id=owner_chat_id, text="❌ Wrong! Try again.")
                 except Exception as e:
                     logger.error(f"Failed to send wrong answer response: {e}")
 
