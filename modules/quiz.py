@@ -227,6 +227,7 @@ async def send_quiz(bot, quiz_type):
         return
 
     total = len(questions)
+    sent_questions = []
 
     for i, q in enumerate(questions, 1):
         q_type = q.get("type", "mcq")
@@ -237,10 +238,14 @@ async def send_quiz(bot, quiz_type):
             msg = format_mcq_message(q, qt, index=i, total=total)
         try:
             await bot.send_message(chat_id=owner_chat_id, text=msg, parse_mode="Markdown")
+            sent_questions.append(q)
         except Exception as e:
             logger.error(f"Failed to send quiz question {i}: {e}")
         if i < total:
             await asyncio.sleep(2)
+
+    if len(sent_questions) < len(questions):
+        logger.warning(f"Quiz: only {len(sent_questions)}/{len(questions)} questions delivered")
 
     # Schedule 30-min answer job for the entire batch
     fire_time = datetime.now() + timedelta(minutes=30)
@@ -261,12 +266,13 @@ async def send_quiz(bot, quiz_type):
         logger.error(f"Failed to schedule quiz answer job: {e}")
         job_id = None
 
-    state[quiz_key]["pending"] = True
-    state[quiz_key]["questions"] = questions
-    state[quiz_key]["current_index"] = 0
+    state[quiz_key]["questions"] = sent_questions
     state[quiz_key]["answer"] = ""
     state[quiz_key]["sent_at"] = datetime.now().isoformat()
     state[quiz_key]["reminder_job_id"] = job_id
+    if sent_questions:
+        state[quiz_key]["pending"] = True
+        state[quiz_key]["current_index"] = 0
     save_quiz_state(state)
 
 async def send_quiz_answer(bot, quiz_type, is_timeout=True):
