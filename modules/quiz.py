@@ -65,7 +65,7 @@ def save_quiz_state(state):
 
 def generate_ai_quiz(recent_topics=None):
     from modules.utils import ask_claude, MODEL_FAST
-    avoid = f"\n\nDo not repeat these recent topics: {recent_topics}" if recent_topics else ""
+    avoid = ("\n\nIMPORTANT: Do NOT repeat or closely reuse any of these recent questions or topics:\n" + "\n".join(recent_topics)) if recent_topics else ""
     prompt = '''Generate a random AI knowledge quiz question. Topics include: AI history, famous models (GPT, BERT, AlphaGo, Stable Diffusion, etc.), AI researchers, AI companies, ML concepts, AI ethics, recent AI breakthroughs, neural network architectures.
 
 Respond ONLY in this exact JSON format with no markdown, no code blocks, no extra text:
@@ -88,7 +88,7 @@ Make it genuinely challenging and educational. Vary the topic each time.''' + av
 
 def generate_python_mcq(recent_topics=None):
     from modules.utils import ask_claude, MODEL_FAST
-    avoid = f"\n\nDo not repeat these recent topics: {recent_topics}" if recent_topics else ""
+    avoid = ("\n\nIMPORTANT: Do NOT repeat or closely reuse any of these recent questions or topics:\n" + "\n".join(recent_topics)) if recent_topics else ""
     prompt = '''Generate a random Python multiple-choice quiz question. Topics: Python syntax, built-in functions, data structures, OOP, decorators, generators, error handling, standard library, Pythonic idioms, list/dict comprehensions, performance tips.
 
 Respond ONLY in this exact JSON format with no markdown, no code blocks, no extra text:
@@ -111,7 +111,7 @@ Make it genuinely challenging. Include short code snippets in the question when 
 
 def generate_python_coding(recent_topics=None):
     from modules.utils import ask_claude, MODEL_FAST
-    avoid = f"\n\nDo not repeat these recent topics: {recent_topics}" if recent_topics else ""
+    avoid = ("\n\nIMPORTANT: Do NOT repeat or closely reuse any of these recent questions or topics:\n" + "\n".join(recent_topics)) if recent_topics else ""
     prompt = '''Generate a Python coding challenge. It should be solvable in 5-15 lines. Topics: string manipulation, list/dict operations, algorithms, recursion, file handling, decorators, comprehensions, sorting.
 
 Respond ONLY in this exact JSON format with no markdown, no code blocks, no extra text:
@@ -244,8 +244,7 @@ async def send_quiz(bot, quiz_type):
         if i < total:
             await asyncio.sleep(2)
 
-    if len(sent_questions) < len(questions):
-        logger.warning(f"Quiz: only {len(sent_questions)}/{len(questions)} questions delivered")
+    logger.warning(f"Quiz sent: {len(sent_questions)}/{len(questions)} delivered")
 
     # Schedule 30-min answer job for the entire batch
     fire_time = datetime.now() + timedelta(minutes=30)
@@ -256,9 +255,9 @@ async def send_quiz(bot, quiz_type):
         # instead of the AsyncIOScheduler set inside main().
         _scheduler = sys.modules['__main__'].scheduler
         _scheduler.add_job(
-            send_quiz_answer,
+            _run_quiz_answer_sync,
             trigger=DateTrigger(run_date=fire_time),
-            args=[bot, quiz_type, True],
+            args=[quiz_type],
             id=job_id,
             replace_existing=True
         )
@@ -515,9 +514,9 @@ def restore_quiz_timeouts(scheduler, bot):
             run_at = fire_time if fire_time > now else now + timedelta(seconds=5)
             job_id = f"quiz_answer_{quiz_type}_{int(fire_time.timestamp())}"
             scheduler.add_job(
-                send_quiz_answer,
+                _run_quiz_answer_sync,
                 trigger=DateTrigger(run_date=run_at),
-                args=[bot, quiz_type, True],
+                args=[quiz_type],
                 id=job_id,
                 replace_existing=True
             )
