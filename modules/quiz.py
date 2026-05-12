@@ -1,8 +1,11 @@
 import asyncio
+import fcntl
 import json
 import logging
+import os
 import random
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -10,13 +13,11 @@ logger = logging.getLogger(__name__)
 
 QUIZ_STATE_FILE = "data/quiz_state.json"
 
+bot_instance = None
+
 DEFAULT_STATE = {
     "ai_quiz": {
         "pending": False,
-        "question": "",
-        "answer": "",
-        "options": {},
-        "explanation": "",
         "questions": [],
         "current_index": 0,
         "sent_at": None,
@@ -26,13 +27,8 @@ DEFAULT_STATE = {
     },
     "python_quiz": {
         "pending": False,
-        "question": "",
-        "answer": "",
-        "options": {},
-        "explanation": "",
         "questions": [],
         "current_index": 0,
-        "type": "mcq",
         "sent_at": None,
         "reminder_job_id": None,
         "day_counter": 0,
@@ -41,37 +37,66 @@ DEFAULT_STATE = {
     }
 }
 
-def load_quiz_state():
+
+def _load_raw():
     try:
         with open(QUIZ_STATE_FILE, "r") as f:
+            fcntl.flock(f, fcntl.LOCK_SH)
             data = json.load(f)
-            # Ensure all keys exist (merge with defaults)
-            for quiz_key in DEFAULT_STATE:
-                if quiz_key not in data:
-                    data[quiz_key] = DEFAULT_STATE[quiz_key].copy()
-                for field in DEFAULT_STATE[quiz_key]:
-                    if field not in data[quiz_key]:
-                        data[quiz_key][field] = DEFAULT_STATE[quiz_key][field]
+            fcntl.flock(f, fcntl.LOCK_UN)
             return data
     except Exception:
         return json.loads(json.dumps(DEFAULT_STATE))
 
-def save_quiz_state(state):
+
+def load_quiz_state():
     try:
-        with open(QUIZ_STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2)
+        data = _load_raw()
+        for quiz_key in DEFAULT_STATE:
+            if quiz_key not in data:
+                data[quiz_key] = DEFAULT_STATE[quiz_key].copy()
+            for field in DEFAULT_STATE[quiz_key]:
+                if field not in data[quiz_key]:
+                    data[quiz_key][field] = DEFAULT_STATE[quiz_key][field]
+        return data
+    except Exception:
+        return json.loads(json.dumps(DEFAULT_STATE))
+
+
+def save_quiz_state(state, quiz_type):
+    path = QUIZ_STATE_FILE
+    full = _load_raw()
+    full[quiz_type] = state
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            json.dump(full, f, indent=2)
+            fcntl.flock(f, fcntl.LOCK_UN)
+        os.replace(tmp, path)
     except Exception as e:
         logger.error(f"Failed to save quiz state: {e}")
 
+
 def generate_ai_quiz(recent_topics=None):
     from modules.utils import ask_claude, MODEL_FAST
-    avoid = ("\n\nIMPORTANT: Do NOT repeat or closely reuse any of these recent questions or topics:\n" + "\n".join(recent_topics)) if recent_topics else ""
-    prompt = '''Generate a random AI knowledge quiz question. Topics include: AI history, famous models (GPT, BERT, AlphaGo, Stable Diffusion, etc.), AI researchers, AI companies, ML concepts, AI ethics, recent AI breakthroughs, neural network architectures.
-
-Respond ONLY in this exact JSON format with no markdown, no code blocks, no extra text:
-{"question": "Question text here?", "options": {"A": "...", "B": "...", "C": "...", "D": "..."}, "answer": "A", "explanation": "Brief explanation why the answer is correct."}
-
-Make it genuinely challenging and educational. Vary the topic each time.''' + avoid
+    avoid = ""
+    if recent_topics:
+        avoid = (
+            "\n\nSTRICT RULE: You must NOT repeat or closely paraphrase any question from this list:\n"
+            + "\n".join(recent_topics)
+            + "\nGenerate a completely different topic."
+        )
+    prompt = (
+        "Generate a random AI knowledge quiz question. Topics include: AI history, famous models "
+        "(GPT, BERT, AlphaGo, Stable Diffusion, etc.), AI researchers, AI companies, ML concepts, "
+        "AI ethics, recent AI breakthroughs, neural network architectures.\n\n"
+        "Respond ONLY in this exact JSON format with no markdown, no code blocks, no extra text:\n"
+        '{"question": "Question text here?", "options": {"A": "...", "B": "...", "C": "...", "D": "..."}, '
+        '"answer": "A", "explanation": "Brief explanation why the answer is correct."}\n\n'
+        "Make it genuinely challenging and educational. Vary the topic each time."
+        + avoid
+    )
     try:
         response = ask_claude("You are a quiz generator. Output only valid JSON.", prompt, model=MODEL_FAST)
         clean = response.strip().replace("```json", "").replace("```", "").strip()
@@ -86,15 +111,27 @@ Make it genuinely challenging and educational. Vary the topic each time.''' + av
             logger.error(f"AI quiz retry failed: {e2}")
             return None
 
+
 def generate_python_mcq(recent_topics=None):
     from modules.utils import ask_claude, MODEL_FAST
-    avoid = ("\n\nIMPORTANT: Do NOT repeat or closely reuse any of these recent questions or topics:\n" + "\n".join(recent_topics)) if recent_topics else ""
-    prompt = '''Generate a random Python multiple-choice quiz question. Topics: Python syntax, built-in functions, data structures, OOP, decorators, generators, error handling, standard library, Pythonic idioms, list/dict comprehensions, performance tips.
-
-Respond ONLY in this exact JSON format with no markdown, no code blocks, no extra text:
-{"question": "Question text here? Include code snippet if relevant using \\n for newlines.", "options": {"A": "...", "B": "...", "C": "...", "D": "..."}, "answer": "B", "explanation": "Brief explanation of the correct answer."}
-
-Make it genuinely challenging. Include short code snippets in the question when relevant.''' + avoid
+    avoid = ""
+    if recent_topics:
+        avoid = (
+            "\n\nSTRICT RULE: You must NOT repeat or closely paraphrase any question from this list:\n"
+            + "\n".join(recent_topics)
+            + "\nGenerate a completely different topic."
+        )
+    prompt = (
+        "Generate a random Python multiple-choice quiz question. Topics: Python syntax, built-in functions, "
+        "data structures, OOP, decorators, generators, error handling, standard library, Pythonic idioms, "
+        "list/dict comprehensions, performance tips.\n\n"
+        "Respond ONLY in this exact JSON format with no markdown, no code blocks, no extra text:\n"
+        '{"question": "Question text here? Include code snippet if relevant using \\n for newlines.", '
+        '"options": {"A": "...", "B": "...", "C": "...", "D": "..."}, "answer": "B", '
+        '"explanation": "Brief explanation of the correct answer."}\n\n'
+        "Make it genuinely challenging. Include short code snippets in the question when relevant."
+        + avoid
+    )
     try:
         response = ask_claude("You are a Python quiz generator. Output only valid JSON.", prompt, model=MODEL_FAST)
         clean = response.strip().replace("```json", "").replace("```", "").strip()
@@ -109,13 +146,25 @@ Make it genuinely challenging. Include short code snippets in the question when 
             logger.error(f"Python MCQ retry failed: {e2}")
             return None
 
+
 def generate_python_coding(recent_topics=None):
     from modules.utils import ask_claude, MODEL_FAST
-    avoid = ("\n\nIMPORTANT: Do NOT repeat or closely reuse any of these recent questions or topics:\n" + "\n".join(recent_topics)) if recent_topics else ""
-    prompt = '''Generate a Python coding challenge. It should be solvable in 5-15 lines. Topics: string manipulation, list/dict operations, algorithms, recursion, file handling, decorators, comprehensions, sorting.
-
-Respond ONLY in this exact JSON format with no markdown, no code blocks, no extra text:
-{"question": "Clearly describe the coding task. Include input/output examples.", "answer": "# Complete working Python solution\\ndef solution():\\n    pass", "explanation": "Brief explanation of the approach and key concepts used."}''' + avoid
+    avoid = ""
+    if recent_topics:
+        avoid = (
+            "\n\nSTRICT RULE: You must NOT repeat or closely paraphrase any question from this list:\n"
+            + "\n".join(recent_topics)
+            + "\nGenerate a completely different topic."
+        )
+    prompt = (
+        "Generate a Python coding challenge. It should be solvable in 5-15 lines. Topics: string manipulation, "
+        "list/dict operations, algorithms, recursion, file handling, decorators, comprehensions, sorting.\n\n"
+        "Respond ONLY in this exact JSON format with no markdown, no code blocks, no extra text:\n"
+        '{"question": "Clearly describe the coding task. Include input/output examples.", '
+        '"answer": "# Complete working Python solution\\ndef solution():\\n    pass", '
+        '"explanation": "Brief explanation of the approach and key concepts used."}'
+        + avoid
+    )
     try:
         response = ask_claude("You are a Python coding challenge generator. Output only valid JSON.", prompt, model=MODEL_FAST)
         clean = response.strip().replace("```json", "").replace("```", "").strip()
@@ -129,6 +178,7 @@ Respond ONLY in this exact JSON format with no markdown, no code blocks, no extr
         except Exception as e2:
             logger.error(f"Python coding retry failed: {e2}")
             return None
+
 
 def format_mcq_message(quiz_data, quiz_type, index=None, total=None):
     emoji = "🧠" if quiz_type == "ai" else "🐍"
@@ -148,6 +198,7 @@ def format_mcq_message(quiz_data, quiz_type, index=None, total=None):
         f"_Generated: {now}_"
     )
 
+
 def format_coding_message(quiz_data, index=None, total=None):
     prefix = f"❓ Question {index}/{total}\n\n" if index is not None and total is not None else ""
     now = datetime.now().strftime('%d %b %Y %H:%M')
@@ -159,6 +210,7 @@ def format_coding_message(quiz_data, index=None, total=None):
         f"_(Reply 'answer' or 'skip' to see the solution)_\n"
         f"_Generated: {now}_"
     )
+
 
 def format_answer_message(quiz_data, quiz_type, is_timeout=True):
     header = "⏰ Time's up!" if is_timeout else "📖 Here's the answer:"
@@ -180,6 +232,7 @@ def format_answer_message(quiz_data, quiz_type, is_timeout=True):
             f"💡 {quiz_data.get('explanation', '')}"
         )
 
+
 async def send_quiz(bot, quiz_type):
     from apscheduler.triggers.date import DateTrigger
 
@@ -187,7 +240,6 @@ async def send_quiz(bot, quiz_type):
     quiz_key = "ai_quiz" if quiz_type == "ai" else "python_quiz"
     owner_chat_id = _get_owner_chat_id()
 
-    # If previous quiz still pending, skip — the 30-min timeout job handles it
     if state[quiz_key]["pending"]:
         logger.info(f"Quiz {quiz_type} still pending, skipping scheduled send")
         return
@@ -223,7 +275,7 @@ async def send_quiz(bot, quiz_type):
             await bot.send_message(chat_id=owner_chat_id, text="⚠️ Failed to generate quiz. Will retry next schedule.")
         except Exception:
             pass
-        save_quiz_state(state)
+        save_quiz_state(state[quiz_key], quiz_key)
         return
 
     total = len(questions)
@@ -239,6 +291,13 @@ async def send_quiz(bot, quiz_type):
         try:
             await bot.send_message(chat_id=owner_chat_id, text=msg, parse_mode="Markdown")
             sent_questions.append(q)
+            # Persist immediately after each successful send — crash-safe
+            state[quiz_key]["questions"] = sent_questions[:]
+            state[quiz_key]["pending"] = True
+            state[quiz_key]["current_index"] = 0
+            if len(sent_questions) == 1:
+                state[quiz_key]["sent_at"] = datetime.now().isoformat()
+            save_quiz_state(state[quiz_key], quiz_key)
         except Exception as e:
             logger.error(f"Failed to send quiz question {i}: {e}")
         if i < total:
@@ -246,33 +305,37 @@ async def send_quiz(bot, quiz_type):
 
     logger.warning(f"Quiz sent: {len(sent_questions)}/{len(questions)} delivered")
 
-    # Schedule 30-min answer job for the entire batch
-    fire_time = datetime.now() + timedelta(minutes=30)
-    job_id = f"quiz_answer_{quiz_type}_{int(fire_time.timestamp())}"
+    if not sent_questions:
+        logger.warning(f"[Quiz] {quiz_type}: no questions delivered, skipping timeout job")
+        return
+
+    # Register 30-min answer timeout using local time to match the scheduler timezone
+    fire_at = datetime.now() + timedelta(minutes=30)
+    job_id = f"{quiz_type}_timeout_{int(time.time())}"
     try:
-        # sys.modules['__main__'] avoids the double-import trap where
-        # 'from bot import scheduler' always gets the module-level None
-        # instead of the AsyncIOScheduler set inside main().
         _scheduler = sys.modules['__main__'].scheduler
         _scheduler.add_job(
             _run_quiz_answer_sync,
-            trigger=DateTrigger(run_date=fire_time),
+            trigger=DateTrigger(run_date=fire_at),
             args=[quiz_type],
             id=job_id,
             replace_existing=True
         )
+        # Save job_id to state immediately after registration
+        state[quiz_key]["reminder_job_id"] = job_id
+        state[quiz_key]["sent_at"] = datetime.now().isoformat()
+        save_quiz_state(state[quiz_key], quiz_key)
+        # Verify the job actually landed in the scheduler
+        registered_ids = [j.id for j in _scheduler.get_jobs()]
+        if job_id not in registered_ids:
+            logger.error(f"[Quiz] CRITICAL: timeout job {job_id} failed to register!")
+        else:
+            logger.info(f"[Quiz] Timeout job registered: {job_id}, fires at {fire_at}")
     except Exception as e:
-        logger.error(f"Failed to schedule quiz answer job: {e}")
-        job_id = None
+        logger.error(f"[Quiz] Failed to schedule quiz answer job: {e}")
+        state[quiz_key]["reminder_job_id"] = None
+        save_quiz_state(state[quiz_key], quiz_key)
 
-    state[quiz_key]["questions"] = sent_questions
-    state[quiz_key]["answer"] = ""
-    state[quiz_key]["sent_at"] = datetime.now().isoformat()
-    state[quiz_key]["reminder_job_id"] = job_id
-    if sent_questions:
-        state[quiz_key]["pending"] = True
-        state[quiz_key]["current_index"] = 0
-    save_quiz_state(state)
 
 async def send_quiz_answer(bot, quiz_type, is_timeout=True):
     state = load_quiz_state()
@@ -303,7 +366,8 @@ async def send_quiz_answer(bot, quiz_type, is_timeout=True):
             lines.append("")
         msg = "\n".join(lines).strip()
     else:
-        msg = format_answer_message(state[quiz_key], quiz_type, is_timeout=is_timeout)
+        header = "⏰ Time's up!" if is_timeout else "📖 Here's the answer:"
+        msg = header
 
     try:
         await bot.send_message(chat_id=owner_chat_id, text=msg, parse_mode="Markdown")
@@ -332,7 +396,8 @@ async def send_quiz_answer(bot, quiz_type, is_timeout=True):
     state[quiz_key]["reminder_job_id"] = None
     state[quiz_key]["questions"] = []
     state[quiz_key]["current_index"] = 0
-    save_quiz_state(state)
+    save_quiz_state(state[quiz_key], quiz_key)
+
 
 async def handle_quiz_response(bot, text, quiz_type):
     state = load_quiz_state()
@@ -345,8 +410,44 @@ async def handle_quiz_response(bot, text, quiz_type):
     resend_keywords = ["resend", "resend answer", "show answer", "last answer",
                        "previous answer", "what was the answer", "answer again"]
 
-    # Bug 1: check pending first — route show/answer/skip to the active batch, not last_completed
     if state[quiz_key]["pending"]:
+        # Watchdog: verify timeout job still exists; re-register or fire answer if lost
+        _reminder_job_id = state[quiz_key].get("reminder_job_id")
+        if _reminder_job_id:
+            try:
+                from apscheduler.triggers.date import DateTrigger as _DT
+                _sch = sys.modules['__main__'].scheduler
+                _job_ids = [j.id for j in _sch.get_jobs()]
+                if _reminder_job_id not in _job_ids:
+                    _sent_at_str = state[quiz_key].get("sent_at", "")
+                    try:
+                        _elapsed = (datetime.now() - datetime.fromisoformat(_sent_at_str)).total_seconds()
+                    except Exception:
+                        _elapsed = 9999
+                    if _elapsed >= 1800:
+                        logger.warning(
+                            f"[Quiz] Watchdog: {quiz_type} timeout job lost, overdue by "
+                            f"{_elapsed - 1800:.0f}s — sending answers now"
+                        )
+                        await send_quiz_answer(bot, quiz_type, is_timeout=True)
+                        return
+                    else:
+                        _remaining = 1800 - _elapsed
+                        _fire_at = datetime.now() + timedelta(seconds=_remaining)
+                        _sch.add_job(
+                            _run_quiz_answer_sync,
+                            trigger=_DT(run_date=_fire_at),
+                            args=[quiz_type],
+                            id=_reminder_job_id,
+                            replace_existing=True
+                        )
+                        logger.warning(
+                            f"[Quiz] Watchdog: re-registered lost timeout job "
+                            f"{_reminder_job_id}, fires in {_remaining:.0f}s"
+                        )
+            except Exception as _we:
+                logger.error(f"[Quiz] Watchdog error for {quiz_type}: {_we}")
+
         if text_lower in show_keywords:
             await send_quiz_answer(bot, quiz_type, is_timeout=False)
             return
@@ -354,43 +455,7 @@ async def handle_quiz_response(bot, text, quiz_type):
         questions = state[quiz_key].get("questions", [])
         current_index = state[quiz_key].get("current_index", 0)
 
-        # Fallback for old state format without questions list
-        if not questions:
-            q_type = state[quiz_key].get("type", "mcq")
-            if q_type == "mcq":
-                user_answer = text_stripped.upper()[0] if text_stripped else ""
-                correct = state[quiz_key].get("answer", "").upper()
-                if user_answer in ["A", "B", "C", "D"]:
-                    if user_answer == correct:
-                        explanation = state[quiz_key].get("explanation", "")
-                        reply = f"✅ Correct! 🎉\n\n💡 {explanation}"
-                        try:
-                            await bot.send_message(chat_id=owner_chat_id, text=reply)
-                        except Exception as e:
-                            logger.error(f"Failed to send correct answer response: {e}")
-                        job_id = state[quiz_key].get("reminder_job_id")
-                        if job_id:
-                            try:
-                                _scheduler = sys.modules['__main__'].scheduler
-                                if _scheduler:
-                                    _scheduler.remove_job(job_id)
-                            except Exception:
-                                pass
-                        state[quiz_key]["last_completed"] = {
-                            "questions": [],
-                            "completed_at": datetime.now().isoformat()
-                        }
-                        state[quiz_key]["pending"] = False
-                        state[quiz_key]["reminder_job_id"] = None
-                        save_quiz_state(state)
-                    else:
-                        try:
-                            await bot.send_message(chat_id=owner_chat_id, text="❌ Wrong answer! Try again or wait for the answer in 30 minutes.")
-                        except Exception as e:
-                            logger.error(f"Failed to send wrong answer response: {e}")
-            return
-
-        if current_index >= len(questions):
+        if not questions or current_index >= len(questions):
             return
 
         current_q = questions[current_index]
@@ -420,7 +485,6 @@ async def handle_quiz_response(bot, text, quiz_type):
                                     _scheduler.remove_job(job_id)
                             except Exception:
                                 pass
-                        # Bug 3: update sent_history; Bug 2: clear current batch
                         completed_questions = state[quiz_key].get("questions", [])
                         new_topics = [q.get("question", "")[:100] for q in completed_questions if q.get("question")]
                         history = state[quiz_key].get("sent_history", [])
@@ -434,7 +498,7 @@ async def handle_quiz_response(bot, text, quiz_type):
                         state[quiz_key]["reminder_job_id"] = None
                         state[quiz_key]["questions"] = []
                         state[quiz_key]["current_index"] = 0
-                    save_quiz_state(state)
+                    save_quiz_state(state[quiz_key], quiz_key)
                 else:
                     try:
                         await bot.send_message(chat_id=owner_chat_id, text="❌ Wrong! Try again.")
@@ -442,7 +506,6 @@ async def handle_quiz_response(bot, text, quiz_type):
                         logger.error(f"Failed to send wrong answer response: {e}")
         return
 
-    # Not pending: handle resend/show-last requests only
     if any(kw in text_lower for kw in resend_keywords):
         last = state[quiz_key].get("last_completed")
         if last and last.get("questions"):
@@ -474,9 +537,10 @@ async def handle_quiz_response(bot, text, quiz_type):
             except Exception as e:
                 logger.error(f"Failed to resend quiz answers: {e}")
 
+
 def _get_owner_chat_id():
-    import os
     return int(os.getenv("OWNER_CHAT_ID", "0"))
+
 
 def _run_quiz_answer_sync(quiz_type):
     """Sync wrapper so APScheduler can fire send_quiz_answer on the running loop."""
@@ -485,34 +549,109 @@ def _run_quiz_answer_sync(quiz_type):
     if not bot:
         logger.error(f"_run_quiz_answer_sync: no bot available for quiz_type={quiz_type}")
         return
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.ensure_future(send_quiz_answer(bot, quiz_type, is_timeout=True))
+    asyncio.ensure_future(send_quiz_answer(bot, quiz_type, is_timeout=True))
+
+
+def _run_ai_quiz_sync():
+    """Sync wrapper so APScheduler can fire send_quiz for the AI quiz."""
+    asyncio.ensure_future(send_quiz(bot_instance, "ai"))
+
+
+def _run_python_quiz_sync():
+    """Sync wrapper so APScheduler can fire send_quiz for the Python quiz."""
+    asyncio.ensure_future(send_quiz(bot_instance, "python"))
+
+
+def get_quiz_status_report():
+    """Return a factual status string — reads directly from disk and scheduler."""
+    state = load_quiz_state()
+    _main = sys.modules.get('__main__')
+    _scheduler = getattr(_main, 'scheduler', None)
+    scheduler_job_ids = {j.id for j in _scheduler.get_jobs()} if _scheduler else set()
+    now = datetime.now()
+    lines = ["Quiz Status\n"]
+    for quiz_key, label in [("ai_quiz", "AI Quiz"), ("python_quiz", "Python Quiz")]:
+        s = state[quiz_key]
+        pending = s.get("pending", False)
+        sent_at_str = s.get("sent_at")
+        questions = s.get("questions", [])
+        current_index = s.get("current_index", 0)
+        job_id = s.get("reminder_job_id")
+        lines.append(f"{label}:")
+        lines.append(f"  pending: {pending}")
+        if sent_at_str:
+            try:
+                sent_at = datetime.fromisoformat(sent_at_str)
+                elapsed = (now - sent_at).total_seconds()
+                if elapsed < 60:
+                    age = f"{elapsed:.0f}s ago"
+                elif elapsed < 3600:
+                    age = f"{elapsed / 60:.0f}m ago"
+                elif elapsed < 86400:
+                    age = f"{elapsed / 3600:.1f}h ago"
+                else:
+                    age = f"{elapsed / 86400:.1f}d ago"
+                lines.append(f"  sent_at: {sent_at_str[:19]} ({age})")
+            except Exception:
+                lines.append(f"  sent_at: {sent_at_str} (unparseable)")
         else:
-            loop.run_until_complete(send_quiz_answer(bot, quiz_type, is_timeout=True))
-    except Exception as e:
-        logger.error(f"Quiz answer sync wrapper error: {e}")
+            lines.append(f"  sent_at: None")
+        lines.append(f"  questions: {len(questions)} total, answering #{current_index + 1}")
+        if job_id:
+            if job_id in scheduler_job_ids:
+                try:
+                    job = next(j for j in _scheduler.get_jobs() if j.id == job_id)
+                    fires = job.next_run_time.strftime("%H:%M:%S") if job.next_run_time else "?"
+                    lines.append(f"  timeout job: {job_id}\n    ✅ in scheduler, fires at {fires}")
+                except Exception:
+                    lines.append(f"  timeout job: {job_id} ✅ in scheduler")
+            else:
+                lines.append(f"  timeout job: {job_id}\n    ❌ NOT in scheduler!")
+        else:
+            lines.append(f"  timeout job: None")
+        lines.append("")
+    return "\n".join(lines).strip()
+
 
 def restore_quiz_timeouts(scheduler, bot):
     """Re-register 30-min timeout jobs for any quizzes still pending after bot restart."""
+    global bot_instance
+    bot_instance = bot
+
+    logger.info("[Quiz] restore_quiz_timeouts() called")
     from apscheduler.triggers.date import DateTrigger
     state = load_quiz_state()
-    changed = False
+
     for quiz_type in ["ai", "python"]:
         quiz_key = "ai_quiz" if quiz_type == "ai" else "python_quiz"
-        if not state[quiz_key].get("pending"):
+        s = state[quiz_key]
+        logger.info(
+            f"[Quiz] {quiz_key}: pending={s.get('pending')}, sent_at={s.get('sent_at')}, "
+            f"job_id={s.get('reminder_job_id')}, questions={len(s.get('questions', []))}"
+        )
+        if not s.get("pending"):
             continue
-        sent_at_str = state[quiz_key].get("sent_at")
+
+        sent_at_str = s.get("sent_at")
         if not sent_at_str:
+            logger.warning(f"[Quiz] {quiz_key}: pending=True but sent_at missing — forcing pending=False")
+            state[quiz_key]["pending"] = False
+            save_quiz_state(state[quiz_key], quiz_key)
             continue
+
         try:
             sent_at = datetime.fromisoformat(sent_at_str)
+        except Exception:
+            logger.warning(f"[Quiz] {quiz_key}: sent_at unparseable ({sent_at_str!r}) — forcing pending=False")
+            state[quiz_key]["pending"] = False
+            save_quiz_state(state[quiz_key], quiz_key)
+            continue
+
+        try:
             fire_time = sent_at + timedelta(minutes=30)
             now = datetime.now()
-            # If already overdue, fire 5 seconds after bot start
             run_at = fire_time if fire_time > now else now + timedelta(seconds=5)
-            job_id = f"quiz_answer_{quiz_type}_{int(fire_time.timestamp())}"
+            job_id = f"{quiz_type}_timeout_{int(time.time())}"
             scheduler.add_job(
                 _run_quiz_answer_sync,
                 trigger=DateTrigger(run_date=run_at),
@@ -521,9 +660,14 @@ def restore_quiz_timeouts(scheduler, bot):
                 replace_existing=True
             )
             state[quiz_key]["reminder_job_id"] = job_id
-            changed = True
-            logger.info(f"Restored quiz timeout for {quiz_type} at {run_at}")
+            save_quiz_state(state[quiz_key], quiz_key)
+            logger.info(f"[Quiz] Restored timeout for {quiz_type} at {run_at}")
         except Exception as e:
-            logger.error(f"Failed to restore quiz timeout for {quiz_type}: {e}")
-    if changed:
-        save_quiz_state(state)
+            logger.error(f"[Quiz] Failed to restore timeout for {quiz_type}: {e}")
+
+    ai_s = state.get("ai_quiz", {})
+    py_s = state.get("python_quiz", {})
+    logger.info(
+        f"[Quiz] Restored: ai_quiz pending={ai_s.get('pending', False)} job={ai_s.get('reminder_job_id')}, "
+        f"python_quiz pending={py_s.get('pending', False)} job={py_s.get('reminder_job_id')}"
+    )

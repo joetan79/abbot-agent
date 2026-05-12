@@ -636,13 +636,13 @@ async def run_scheduled_job(bot, job_id: str, action: str):
         text = f"Daily Report\n\n{msg}"
 
     elif action == "ai_quiz" or "ai_quiz" in action:
-        from modules.quiz import send_quiz
-        await send_quiz(bot, "ai")
+        from modules.quiz import _run_ai_quiz_sync
+        _run_ai_quiz_sync()
         return
 
     elif action == "python_quiz" or "python_quiz" in action or "python quiz" in action.lower():
-        from modules.quiz import send_quiz
-        await send_quiz(bot, "python")
+        from modules.quiz import _run_python_quiz_sync
+        _run_python_quiz_sync()
         return
 
     else:
@@ -1208,14 +1208,22 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     # ──────────────────────────────────────────
 
-    # Quiz answer intercept — handle pending responses AND resend requests
+    # Quiz answer intercept — handle pending responses, resend, and status queries
     try:
-        from modules.quiz import load_quiz_state, handle_quiz_response
+        from modules.quiz import load_quiz_state, handle_quiz_response, get_quiz_status_report
         _quiz_state = load_quiz_state()
         _resend_kws = ["resend", "resend answer", "show answer", "last answer",
                        "previous answer", "what was the answer", "answer again"]
+        _status_kws = ["quiz status", "quiz state", "did you send the quiz",
+                       "quiz pending", "check quiz", "show quiz status", "quiz job",
+                       "why no quiz answer", "quiz answer status", "what quiz"]
         _text_lower = text.lower()
         _wants_resend = any(kw in _text_lower for kw in _resend_kws)
+        _wants_status = any(kw in _text_lower for kw in _status_kws)
+        if _wants_status:
+            _report = get_quiz_status_report()
+            await update.message.reply_text(_report)
+            return
         for _qtype, _qkey in [("ai", "ai_quiz"), ("python", "python_quiz")]:
             if _quiz_state[_qkey]["pending"] or _wants_resend:
                 await handle_quiz_response(context.bot, text, _qtype)
