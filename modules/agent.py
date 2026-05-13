@@ -344,6 +344,7 @@ def is_failed_response(text: str) -> bool:
 
 async def run_scheduled_job(bot, job_id: str, action: str):
     """Execute a scheduled job with live web search."""
+    logger.info(f"[SCHEDULER] run_scheduled_job() FIRED: job_id={job_id}, action={action}, time={datetime.utcnow().isoformat()}")
     logger.info(f"Running scheduled job: {job_id} - {action}")
     # Use job-specific city if set, otherwise fall back to default memory city
     city = memory_get(f"city_{job_id}", None) or memory_get("city", "Kuala Lumpur")
@@ -1209,6 +1210,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # ──────────────────────────────────────────
 
     # Quiz answer intercept — handle pending responses, resend, and status queries
+    _quiz_handled = False
     try:
         from modules.quiz import load_quiz_state, handle_quiz_response, get_quiz_status_report
         _quiz_state = load_quiz_state()
@@ -1226,9 +1228,12 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         for _qtype, _qkey in [("ai", "ai_quiz"), ("python", "python_quiz")]:
             if _quiz_state[_qkey]["pending"] or _wants_resend:
-                await handle_quiz_response(context.bot, text, _qtype)
+                if await handle_quiz_response(context.bot, text, _qtype):
+                    _quiz_handled = True
     except Exception as _qe:
         logger.error(f"Quiz intercept error: {_qe}")
+    if _quiz_handled:
+        return
 
     # Continue with intent parsing...
     intent_data = parse_intent(text)

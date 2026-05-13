@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import time
 from datetime import datetime, timedelta
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 QUIZ_STATE_FILE = "data/quiz_state.json"
 
 bot_instance = None
+_loop = None
 
 DEFAULT_STATE = {
     "ai_quiz": {
@@ -180,6 +182,13 @@ def generate_python_coding(recent_topics=None):
             return None
 
 
+def _parse_multi_answers(text):
+    """Parse multi-question answers like '2 C; 3 C' or 'Q2: C, Q3: C'.
+    Returns {sent_index: answer_letter} dict, or empty dict if no matches."""
+    matches = re.findall(r'[Qq]?(\d+)\s*[:.)\s]\s*([ABCDabcd])', text)
+    return {int(n): l.upper() for n, l in matches} if matches else {}
+
+
 def format_mcq_message(quiz_data, quiz_type, index=None, total=None):
     emoji = "🧠" if quiz_type == "ai" else "🐍"
     label = "AI Knowledge Quiz" if quiz_type == "ai" else "Python Quiz"
@@ -280,33 +289,39 @@ async def send_quiz(bot, quiz_type):
 
     total = len(questions)
     sent_questions = []
-
-    for i, q in enumerate(questions, 1):
+    for i, q in enumerate(questions):
         q_type = q.get("type", "mcq")
         if q_type == "coding":
-            msg = format_coding_message(q, index=i, total=total)
+            msg = format_coding_message(q, index=i + 1, total=total)
         else:
             qt = "ai" if quiz_type == "ai" else "python"
-            msg = format_mcq_message(q, qt, index=i, total=total)
+            msg = format_mcq_message(q, qt, index=i + 1, total=total)
         try:
             await bot.send_message(chat_id=owner_chat_id, text=msg, parse_mode="Markdown")
+            q["sent_index"] = i + 1
             sent_questions.append(q)
-            # Persist immediately after each successful send — crash-safe
-            state[quiz_key]["questions"] = sent_questions[:]
-            state[quiz_key]["pending"] = True
-            state[quiz_key]["current_index"] = 0
-            if len(sent_questions) == 1:
-                state[quiz_key]["sent_at"] = datetime.now().isoformat()
-            save_quiz_state(state[quiz_key], quiz_key)
+            logger.info(f"[Quiz] Sent Q{i+1}/{total} for {quiz_type}")
+            await asyncio.sleep(0.5)
         except Exception as e:
-            logger.error(f"Failed to send quiz question {i}: {e}")
-        if i < total:
-            await asyncio.sleep(2)
+            logger.error(f"[Quiz] Failed to send Q{i+1}/{total}: {e}")
+            logger.error(f"[Quiz] Q{i+1} text was: {q.get('question', '')[:100]}")
+            try:
+                await bot.send_message(chat_id=owner_chat_id, text=msg)
+                q["sent_index"] = i + 1
+                sent_questions.append(q)
+                logger.warning(f"[Quiz] Q{i+1} sent without Markdown after initial failure: {e}")
+            except Exception as e2:
+                logger.error(f"[Quiz] Q{i+1} completely failed: {e2}")
 
-    logger.warning(f"Quiz sent: {len(sent_questions)}/{len(questions)} delivered")
-
-    if not sent_questions:
-        logger.warning(f"[Quiz] {quiz_type}: no questions delivered, skipping timeout job")
+    if sent_questions:
+        state[quiz_key]["questions"] = sent_questions
+        state[quiz_key]["pending"] = True
+        state[quiz_key]["sent_at"] = datetime.utcnow().isoformat()
+        state[quiz_key]["current_index"] = 0
+        save_quiz_state(state[quiz_key], quiz_key)
+        logger.info(f"[Quiz] State saved: {len(sent_questions)}/{len(questions)} questions delivered")
+    else:
+        logger.error(f"[Quiz] No questions delivered for {quiz_type} — state not updated")
         return
 
     # Register 30-min answer timeout using local time to match the scheduler timezone
@@ -351,17 +366,18 @@ async def send_quiz_answer(bot, quiz_type, is_timeout=True):
     if questions and current_index < len(questions):
         header = "⏰ Time's up! Here are the answers:" if is_timeout else "📖 Here are the answers:"
         lines = [header, ""]
-        for i, q in enumerate(questions[current_index:], current_index + 1):
+        for pos, q in enumerate(questions[current_index:], current_index):
+            q_num = q.get("sent_index", pos + 1)
             q_type = q.get("type", "mcq")
             if q_type == "coding":
-                lines.append(f"Q{i}) Solution:")
+                lines.append(f"Q{q_num}) Solution:")
                 lines.append(f"```python\n{q['answer']}\n```")
                 lines.append(f"💡 {q.get('explanation', '')}")
             else:
                 answer_key = q.get("answer", "")
                 opts = q.get("options", {})
                 answer_text = opts.get(answer_key, "")
-                lines.append(f"Q{i}) {answer_key}) {answer_text}")
+                lines.append(f"Q{q_num}) {answer_key}) {answer_text}")
                 lines.append(f"💡 {q.get('explanation', '')}")
             lines.append("")
         msg = "\n".join(lines).strip()
@@ -463,13 +479,64 @@ async def handle_quiz_response(bot, text, quiz_type):
         total = len(questions)
 
         if q_type == "mcq":
+            # Try multi-answer first: "2 C; 3 C" or "Q2: C, Q3: C"
+            multi = _parse_multi_answers(text_stripped)
+            if multi:
+                feedback_lines = []
+                max_answered_idx = current_index - 1
+                for q_idx, q in enumerate(questions):
+                    sidx = q.get("sent_index", q_idx + 1)
+                    if sidx not in multi:
+                        continue
+                    user_ans = multi[sidx]
+                    correct_ans = q.get("answer", "").upper()
+                    opts = q.get("options", {})
+                    if user_ans == correct_ans:
+                        feedback_lines.append(f"✅ Q{sidx} Correct! 💡 {q.get('explanation', '')}")
+                    else:
+                        correct_text = opts.get(correct_ans, "")
+                        feedback_lines.append(f"❌ Q{sidx} Wrong! Correct: {correct_ans}) {correct_text}")
+                    max_answered_idx = max(max_answered_idx, q_idx)
+                if feedback_lines:
+                    try:
+                        await bot.send_message(chat_id=owner_chat_id, text="\n\n".join(feedback_lines))
+                    except Exception as e:
+                        logger.error(f"Failed to send multi-answer feedback: {e}")
+                    new_index = max_answered_idx + 1
+                    state[quiz_key]["current_index"] = new_index
+                    if new_index >= total:
+                        job_id = state[quiz_key].get("reminder_job_id")
+                        if job_id:
+                            try:
+                                _scheduler = sys.modules['__main__'].scheduler
+                                if _scheduler:
+                                    _scheduler.remove_job(job_id)
+                            except Exception:
+                                pass
+                        completed_questions = state[quiz_key].get("questions", [])
+                        new_topics = [q.get("question", "")[:100] for q in completed_questions if q.get("question")]
+                        history = state[quiz_key].get("sent_history", [])
+                        history.extend(new_topics)
+                        state[quiz_key]["sent_history"] = history[-7:]
+                        state[quiz_key]["last_completed"] = {
+                            "questions": completed_questions,
+                            "completed_at": datetime.now().isoformat()
+                        }
+                        state[quiz_key]["pending"] = False
+                        state[quiz_key]["reminder_job_id"] = None
+                        state[quiz_key]["questions"] = []
+                        state[quiz_key]["current_index"] = 0
+                    save_quiz_state(state[quiz_key], quiz_key)
+                    return True
+
+            # Single-answer fallback: just a letter like "C"
             user_answer = text_stripped.upper()[0] if text_stripped else ""
             correct = current_q.get("answer", "").upper()
+            q_num = current_q.get("sent_index", current_index + 1)
             if user_answer in ["A", "B", "C", "D"]:
                 if user_answer == correct:
                     explanation = current_q.get("explanation", "")
-                    n = current_index + 1
-                    reply = f"✅ Q{n} Correct! 💡 {explanation}"
+                    reply = f"✅ Q{q_num} Correct! 💡 {explanation}"
                     try:
                         await bot.send_message(chat_id=owner_chat_id, text=reply)
                     except Exception as e:
@@ -504,7 +571,8 @@ async def handle_quiz_response(bot, text, quiz_type):
                         await bot.send_message(chat_id=owner_chat_id, text="❌ Wrong! Try again.")
                     except Exception as e:
                         logger.error(f"Failed to send wrong answer response: {e}")
-        return
+                return True
+        return False
 
     if any(kw in text_lower for kw in resend_keywords):
         last = state[quiz_key].get("last_completed")
@@ -512,16 +580,17 @@ async def handle_quiz_response(bot, text, quiz_type):
             header = "📖 Last quiz answers:"
             lines = [header, ""]
             for i, q in enumerate(last["questions"], 1):
+                q_num = q.get("sent_index", i)
                 q_type = q.get("type", "mcq")
                 if q_type == "coding":
-                    lines.append(f"Q{i}) Solution:")
+                    lines.append(f"Q{q_num}) Solution:")
                     lines.append(f"```python\n{q['answer']}\n```")
                     lines.append(f"💡 {q.get('explanation', '')}")
                 else:
                     answer_key = q.get("answer", "")
                     opts = q.get("options", {})
                     answer_text = opts.get(answer_key, "")
-                    lines.append(f"Q{i}) {answer_key}) {answer_text}")
+                    lines.append(f"Q{q_num}) {answer_key}) {answer_text}")
                     lines.append(f"💡 {q.get('explanation', '')}")
                 lines.append("")
             msg = "\n".join(lines).strip()
@@ -534,8 +603,10 @@ async def handle_quiz_response(bot, text, quiz_type):
                     pass
             try:
                 await bot.send_message(chat_id=owner_chat_id, text=msg, parse_mode="Markdown")
+                return True
             except Exception as e:
                 logger.error(f"Failed to resend quiz answers: {e}")
+    return False
 
 
 def _get_owner_chat_id():
@@ -549,17 +620,34 @@ def _run_quiz_answer_sync(quiz_type):
     if not bot:
         logger.error(f"_run_quiz_answer_sync: no bot available for quiz_type={quiz_type}")
         return
-    asyncio.ensure_future(send_quiz_answer(bot, quiz_type, is_timeout=True))
+    if _loop and _loop.is_running():
+        asyncio.run_coroutine_threadsafe(send_quiz_answer(bot, quiz_type, is_timeout=True), _loop)
+    else:
+        asyncio.ensure_future(send_quiz_answer(bot, quiz_type, is_timeout=True))
 
 
 def _run_ai_quiz_sync():
     """Sync wrapper so APScheduler can fire send_quiz for the AI quiz."""
-    asyncio.ensure_future(send_quiz(bot_instance, "ai"))
+    logger.info(f"[QUIZ] _run_ai_quiz_sync called at {datetime.utcnow().isoformat()}")
+    if bot_instance is None:
+        logger.error("[QUIZ] bot_instance is None! Cannot send quiz.")
+        return
+    if _loop and _loop.is_running():
+        asyncio.run_coroutine_threadsafe(send_quiz(bot_instance, "ai"), _loop)
+    else:
+        asyncio.ensure_future(send_quiz(bot_instance, "ai"))
 
 
 def _run_python_quiz_sync():
     """Sync wrapper so APScheduler can fire send_quiz for the Python quiz."""
-    asyncio.ensure_future(send_quiz(bot_instance, "python"))
+    logger.info(f"[QUIZ] _run_python_quiz_sync called at {datetime.utcnow().isoformat()}")
+    if bot_instance is None:
+        logger.error("[QUIZ] bot_instance is None! Cannot send quiz.")
+        return
+    if _loop and _loop.is_running():
+        asyncio.run_coroutine_threadsafe(send_quiz(bot_instance, "python"), _loop)
+    else:
+        asyncio.ensure_future(send_quiz(bot_instance, "python"))
 
 
 def get_quiz_status_report():
@@ -615,8 +703,10 @@ def get_quiz_status_report():
 
 def restore_quiz_timeouts(scheduler, bot):
     """Re-register 30-min timeout jobs for any quizzes still pending after bot restart."""
-    global bot_instance
+    global bot_instance, _loop
     bot_instance = bot
+    _loop = asyncio.get_event_loop()
+    logger.info(f"[QUIZ] _bot_instance set: {bot}")
 
     logger.info("[Quiz] restore_quiz_timeouts() called")
     from apscheduler.triggers.date import DateTrigger

@@ -14,6 +14,7 @@ from telegram.ext import (
 from modules.utils import handle_photo
 from modules import gmail_monitor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from modules.utils import (
     is_owner, is_allowed, schedule_load_all,
@@ -280,28 +281,47 @@ def restore_scheduled_deletions(application, scheduler):
 
 
 def restore_schedules(scheduler, bot):
+    from modules.quiz import _run_ai_quiz_sync, _run_python_quiz_sync
     jobs = schedule_load_all()
     for job_id, j in jobs.items():
         try:
             h, m = map(int, j["time"].split(":"))
             freq = j.get("frequency", "daily")
             action = j.get("action", "chat")
-            if freq == "daily":
+            logger.info(f"[SCHEDULER] Restoring job: label={j.get('label')} action={j.get('action')} time={j.get('time')}")
+            if "ai_quiz" in action:
                 scheduler.add_job(
-                    run_scheduled_job, "cron",
-                    hour=h, minute=m,
-                    args=[bot, job_id, action],
-                    id=job_id, replace_existing=True,
+                    _run_ai_quiz_sync,
+                    trigger=CronTrigger(hour=h, minute=m),
+                    id=job_id,
+                    replace_existing=True,
                 )
-            elif freq == "weekly" and j.get("day"):
+                logger.info(f"[SCHEDULER] Registered ai_quiz direct job at {h}:{m:02d}")
+            elif "python_quiz" in action:
                 scheduler.add_job(
-                    run_scheduled_job, "cron",
-                    day_of_week=j["day"][:3].lower(),
-                    hour=h, minute=m,
-                    args=[bot, job_id, action],
-                    id=job_id, replace_existing=True,
+                    _run_python_quiz_sync,
+                    trigger=CronTrigger(hour=h, minute=m),
+                    id=job_id,
+                    replace_existing=True,
                 )
-            logger.info(f"Restored: {job_id} at {j['time']} ({freq})")
+                logger.info(f"[SCHEDULER] Registered python_quiz direct job at {h}:{m:02d}")
+            else:
+                if freq == "daily":
+                    scheduler.add_job(
+                        run_scheduled_job, "cron",
+                        hour=h, minute=m,
+                        args=[bot, job_id, action],
+                        id=job_id, replace_existing=True,
+                    )
+                elif freq == "weekly" and j.get("day"):
+                    scheduler.add_job(
+                        run_scheduled_job, "cron",
+                        day_of_week=j["day"][:3].lower(),
+                        hour=h, minute=m,
+                        args=[bot, job_id, action],
+                        id=job_id, replace_existing=True,
+                    )
+                logger.info(f"Restored: {job_id} at {j['time']} ({freq})")
         except Exception as e:
             logger.error(f"Failed to restore {job_id}: {e}")
 
@@ -603,6 +623,9 @@ async def main():
     )
     scheduler.start()
     logger.info("⏰ Scheduler started")
+    logger.info("[SCHEDULER] All registered jobs at startup:")
+    for job in scheduler.get_jobs():
+        logger.info(f"  job_id={job.id} | next_run={job.next_run_time} | func={job.func_ref if hasattr(job, 'func_ref') else job.func}")
     logger.info("📧 Gmail monitor scheduled every 30 minutes")
     logger.info("🗑️ Daily published_articles cleanup scheduled at 03:00")
     app.add_handler(CommandHandler("start",     cmd_start))
