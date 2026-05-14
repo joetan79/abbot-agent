@@ -388,7 +388,13 @@ async def send_quiz_answer(bot, quiz_type, is_timeout=True):
     try:
         await bot.send_message(chat_id=owner_chat_id, text=msg, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Failed to send quiz answer: {e}")
+        logger.error(f"Failed to send quiz answer with Markdown: {e}")
+        try:
+            await bot.send_message(chat_id=owner_chat_id, text=msg)
+            logger.warning("Quiz answer sent without Markdown after initial failure")
+        except Exception as e2:
+            logger.error(f"Failed to send quiz answer without Markdown: {e2}")
+            return  # Don't mark complete — keep pending so user can retry
 
     job_id = state[quiz_key].get("reminder_job_id")
     if job_id:
