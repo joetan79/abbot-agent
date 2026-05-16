@@ -316,7 +316,7 @@ async def send_quiz(bot, quiz_type):
     if sent_questions:
         state[quiz_key]["questions"] = sent_questions
         state[quiz_key]["pending"] = True
-        state[quiz_key]["sent_at"] = datetime.utcnow().isoformat()
+        state[quiz_key]["sent_at"] = datetime.now().isoformat()
         state[quiz_key]["current_index"] = 0
         save_quiz_state(state[quiz_key], quiz_key)
         logger.info(f"[Quiz] State saved: {len(sent_questions)}/{len(questions)} questions delivered")
@@ -363,38 +363,41 @@ async def send_quiz_answer(bot, quiz_type, is_timeout=True):
     questions = state[quiz_key].get("questions", [])
     current_index = state[quiz_key].get("current_index", 0)
 
-    if questions and current_index < len(questions):
-        header = "⏰ Time's up! Here are the answers:" if is_timeout else "📖 Here are the answers:"
-        lines = [header, ""]
+    header = "⏰ Time's up! Here are the answers:" if is_timeout else "📖 Here are the answers:"
+
+    if not questions or current_index >= len(questions):
+        try:
+            await bot.send_message(chat_id=owner_chat_id, text=header)
+        except Exception as e:
+            logger.error(f"Failed to send quiz answer header: {e}")
+            return
+    else:
+        # Send one message per answer so long coding solutions never hit Telegram's 4096-char limit
+        header_sent = False
         for pos, q in enumerate(questions[current_index:], current_index):
             q_num = q.get("sent_index", pos + 1)
             q_type = q.get("type", "mcq")
             if q_type == "coding":
-                lines.append(f"Q{q_num}) Solution:")
-                lines.append(f"```python\n{q['answer']}\n```")
-                lines.append(f"💡 {q.get('explanation', '')}")
+                body = f"Q{q_num}) Solution:\n```python\n{q['answer']}\n```\n\n💡 {q.get('explanation', '')}"
             else:
                 answer_key = q.get("answer", "")
                 opts = q.get("options", {})
                 answer_text = opts.get(answer_key, "")
-                lines.append(f"Q{q_num}) {answer_key}) {answer_text}")
-                lines.append(f"💡 {q.get('explanation', '')}")
-            lines.append("")
-        msg = "\n".join(lines).strip()
-    else:
-        header = "⏰ Time's up!" if is_timeout else "📖 Here's the answer:"
-        msg = header
+                body = f"Q{q_num}) {answer_key}) {answer_text}\n\n💡 {q.get('explanation', '')}"
 
-    try:
-        await bot.send_message(chat_id=owner_chat_id, text=msg, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Failed to send quiz answer with Markdown: {e}")
-        try:
-            await bot.send_message(chat_id=owner_chat_id, text=msg)
-            logger.warning("Quiz answer sent without Markdown after initial failure")
-        except Exception as e2:
-            logger.error(f"Failed to send quiz answer without Markdown: {e2}")
-            return  # Don't mark complete — keep pending so user can retry
+            msg = f"{header}\n\n{body}" if not header_sent else body
+            try:
+                await bot.send_message(chat_id=owner_chat_id, text=msg, parse_mode="Markdown")
+                header_sent = True
+            except Exception as e:
+                logger.error(f"Failed to send Q{q_num} answer with Markdown: {e}")
+                try:
+                    await bot.send_message(chat_id=owner_chat_id, text=msg)
+                    header_sent = True
+                except Exception as e2:
+                    logger.error(f"Failed to send Q{q_num} answer: {e2}")
+            if not header_sent:
+                return  # First message failed entirely — keep pending so user can retry
 
     job_id = state[quiz_key].get("reminder_job_id")
     if job_id:
@@ -584,34 +587,37 @@ async def handle_quiz_response(bot, text, quiz_type):
         last = state[quiz_key].get("last_completed")
         if last and last.get("questions"):
             header = "📖 Last quiz answers:"
-            lines = [header, ""]
+            completed_at = last.get("completed_at", "")
+            header_sent = False
             for i, q in enumerate(last["questions"], 1):
                 q_num = q.get("sent_index", i)
                 q_type = q.get("type", "mcq")
                 if q_type == "coding":
-                    lines.append(f"Q{q_num}) Solution:")
-                    lines.append(f"```python\n{q['answer']}\n```")
-                    lines.append(f"💡 {q.get('explanation', '')}")
+                    body = f"Q{q_num}) Solution:\n```python\n{q['answer']}\n```\n\n💡 {q.get('explanation', '')}"
                 else:
                     answer_key = q.get("answer", "")
                     opts = q.get("options", {})
                     answer_text = opts.get(answer_key, "")
-                    lines.append(f"Q{q_num}) {answer_key}) {answer_text}")
-                    lines.append(f"💡 {q.get('explanation', '')}")
-                lines.append("")
-            msg = "\n".join(lines).strip()
-            completed_at = last.get("completed_at", "")
-            if completed_at:
+                    body = f"Q{q_num}) {answer_key}) {answer_text}\n\n💡 {q.get('explanation', '')}"
+                msg = f"{header}\n\n{body}" if not header_sent else body
+                if not header_sent and completed_at:
+                    try:
+                        dt = datetime.fromisoformat(completed_at)
+                        msg += f"\n\n_Completed: {dt.strftime('%d %b %Y %H:%M')}_"
+                    except Exception:
+                        pass
                 try:
-                    dt = datetime.fromisoformat(completed_at)
-                    msg += f"\n\n_Completed: {dt.strftime('%d %b %Y %H:%M')}_"
-                except Exception:
-                    pass
-            try:
-                await bot.send_message(chat_id=owner_chat_id, text=msg, parse_mode="Markdown")
+                    await bot.send_message(chat_id=owner_chat_id, text=msg, parse_mode="Markdown")
+                    header_sent = True
+                except Exception as e:
+                    logger.error(f"Failed to resend Q{q_num} answer: {e}")
+                    try:
+                        await bot.send_message(chat_id=owner_chat_id, text=msg)
+                        header_sent = True
+                    except Exception as e2:
+                        logger.error(f"Failed to resend Q{q_num} answer plain: {e2}")
+            if header_sent:
                 return True
-            except Exception as e:
-                logger.error(f"Failed to resend quiz answers: {e}")
     return False
 
 
