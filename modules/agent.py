@@ -196,7 +196,11 @@ def parse_news_articles(msg: str, time_period: str = "24 hours") -> list:
 
 
 def parse_intent(text: str) -> dict:
-    system = """You are an intent parser for a personal AI agent Telegram bot.
+    import pytz as _pytz
+    _now = datetime.now(_pytz.timezone('Asia/Kuala_Lumpur'))
+    _now_str = _now.strftime("%A, %d %B %Y %H:%M (UTC+8)")
+    system = f"""You are an intent parser for a personal AI agent Telegram bot.
+Current date and time: {_now_str}
 Parse the user message carefully and return ONLY valid JSON.
 You support English and Chinese (Traditional and Simplified) input.
 Parse the intent regardless of which language is used.
@@ -291,9 +295,30 @@ DELETION EXAMPLES:
 "delete this in 2 hours" → {"intent":"message_schedule_delete_reply","duration_seconds":7200}
 "30分钟后删除" → {"intent":"message_schedule_delete_reply","duration_seconds":1800}
 
+REMINDER INTENT RULES (one-time reminders, NOT recurring schedules):
+- Return "reminder_add" when user wants a ONE-TIME alert/reminder at a specific time or after a delay
+  - "remind me at 10am to make coffee" → fire_time: "10:00", delay_minutes: null, reminder_message: "make coffee"
+  - "remind me in 30 minutes to call John" → fire_time: null, delay_minutes: 30, reminder_message: "call John"
+  - "待會10am提我冲咖啡" → fire_time: "10:00", delay_minutes: null, reminder_message: "冲咖啡"
+  - "提我10點要吃藥" → fire_time: "10:00", delay_minutes: null, reminder_message: "吃藥"
+  - "30分鐘後提我開會" → fire_time: null, delay_minutes: 30, reminder_message: "開會"
+  Use current date/time above to decide if fire_time is today or tomorrow:
+  If the specified time has already passed today → set fire_date to "tomorrow", else "today"
+- Return "reminder_list" when user asks to see/check pending reminders
+  - "what reminders do I have?" / "show reminders" / "check reminders" / "有什么提醒?" / "提醒清單"
+- Return "reminder_cancel" when user wants to cancel/delete a reminder
+  - "cancel my coffee reminder" / "delete the 10am reminder" / "取消提醒"
+
+REMINDER EXAMPLES:
+"remind me at 10am to make coffee" → {"intent":"reminder_add","fire_time":"10:00","fire_date":"today","delay_minutes":null,"reminder_message":"make coffee"}
+"remind me in 30 min to stretch" → {"intent":"reminder_add","fire_time":null,"fire_date":null,"delay_minutes":30,"reminder_message":"stretch"}
+"待會10am提我冲咖啡" → {"intent":"reminder_add","fire_time":"10:00","fire_date":"today","delay_minutes":null,"reminder_message":"冲咖啡"}
+"show my reminders" → {"intent":"reminder_list"}
+"cancel reminders" → {"intent":"reminder_cancel","reminder_message":null}
+
 Return JSON:
 {
-  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, chat],
+  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, chat],
   "time": "HH:MM" or null,
   "frequency": "daily" or "weekly" or "once" or null,
   "day": day of week or null,
@@ -305,7 +330,11 @@ Return JSON:
   "activity": activity name or null,
   "hours": number of hours or null,
   "target_count": integer for delete_last or null,
-  "duration_seconds": integer seconds for scheduled/auto-delete or null
+  "duration_seconds": integer seconds for scheduled/auto-delete or null,
+  "fire_time": "HH:MM" for reminder at specific time or null,
+  "fire_date": "today" or "tomorrow" or null,
+  "delay_minutes": integer minutes for "in X minutes" reminders or null,
+  "reminder_message": what to remind about or null
 }
 Return ONLY the JSON object, no markdown, no explanation."""
     raw = ask_claude(system, text, max_tokens=300, model=MODEL_FAST)
@@ -1536,6 +1565,119 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 "Example:\n"
                 "Remember my study window is 4 hours"
             )
+
+    elif intent == "reminder_add":
+        import pytz as _pytz
+        import uuid as _uuid
+        from modules.reminders import save_reminder as _save_reminder
+        _tz = _pytz.timezone('Asia/Kuala_Lumpur')
+        _now_local = datetime.now(_tz)
+        _chat_id = update.effective_chat.id
+        _reminder_msg_text = intent_data.get("reminder_message") or text
+        _fire_time_str = intent_data.get("fire_time")   # "HH:MM" or null
+        _delay_minutes = intent_data.get("delay_minutes")  # int or null
+        _fire_date_hint = intent_data.get("fire_date")  # "today"/"tomorrow"/null
+
+        if _delay_minutes:
+            _fire_dt = _now_local + timedelta(minutes=int(_delay_minutes))
+        elif _fire_time_str:
+            try:
+                _h, _m = map(int, _fire_time_str.split(":"))
+            except Exception:
+                await update.message.reply_text("⚠️ Couldn't parse the time. Try: 'remind me at 10:00 to make coffee'")
+                return
+            _fire_dt = _now_local.replace(hour=_h, minute=_m, second=0, microsecond=0)
+            # If time already passed today → push to tomorrow (unless hint says today)
+            if _fire_dt <= _now_local and _fire_date_hint != "today":
+                _fire_dt += timedelta(days=1)
+            elif _fire_date_hint == "tomorrow":
+                _fire_dt += timedelta(days=1)
+        else:
+            await update.message.reply_text("⚠️ Please tell me when. E.g. 'remind me at 10am to make coffee' or 'remind me in 30 minutes to call John'")
+            return
+
+        _rid = f"rem_{_uuid.uuid4().hex[:8]}"
+        _fire_msg = f"⏰ Reminder: {_reminder_msg_text}"
+        _saved = _save_reminder(
+            reminder_id=_rid,
+            chat_id=_chat_id,
+            message=_fire_msg,
+            fire_at=_fire_dt,
+            reminder_type="general",
+            auto_delete=True,
+        )
+        _scheduler = context.application.bot_data.get("scheduler")
+        if _scheduler:
+            _scheduler.add_job(
+                fire_reminder,
+                "date",
+                run_date=_fire_dt,
+                args=[context.bot, _rid, _chat_id, _fire_msg],
+                id=_rid,
+                replace_existing=True,
+            )
+        _when_str = _fire_dt.strftime("%d %b %Y %H:%M")
+        _mins_from_now = int((_fire_dt - _now_local).total_seconds() / 60)
+        if _mins_from_now < 60:
+            _in_str = f"in {_mins_from_now} min"
+        elif _mins_from_now < 1440:
+            _in_str = f"in {_mins_from_now // 60}h {_mins_from_now % 60}m"
+        else:
+            _in_str = f"in {_mins_from_now // 1440}d {(_mins_from_now % 1440) // 60}h"
+        await update.message.reply_text(
+            f"⏰ Reminder set!\n\n"
+            f"📌 {_reminder_msg_text}\n"
+            f"🕐 {_when_str} ({_in_str})\n\n"
+            f"ID: {_rid}"
+        )
+
+    elif intent == "reminder_list":
+        from modules.reminders import get_all_reminders as _get_all_rem
+        import pytz as _pytz
+        _tz = _pytz.timezone('Asia/Kuala_Lumpur')
+        _now_local = datetime.now(_tz)
+        _all_rems = _get_all_rem()
+        _pending = {
+            k: v for k, v in _all_rems.items()
+            if not v.get("fired", False)
+        }
+        if not _pending:
+            await update.message.reply_text("✅ No pending reminders.")
+            return
+        _lines = ["⏰ Pending Reminders:\n"]
+        for _rid, _r in _pending.items():
+            try:
+                _fire_at = datetime.fromisoformat(_r["fire_at"])
+                if _fire_at.tzinfo is None:
+                    _fire_at = _fire_at.replace(tzinfo=_pytz.timezone('Asia/Kuala_Lumpur'))
+                _fire_local = _fire_at.astimezone(_tz)
+                _when = _fire_local.strftime("%d %b %H:%M")
+            except Exception:
+                _when = _r.get("fire_at", "?")
+            _lines.append(f"• {_r.get('message','?')}\n  🕐 {_when}  ID: {_rid}")
+        await update.message.reply_text("\n".join(_lines))
+
+    elif intent == "reminder_cancel":
+        from modules.reminders import get_all_reminders as _get_all_rem, delete_reminder as _del_rem
+        _all_rems = _get_all_rem()
+        _pending = {k: v for k, v in _all_rems.items() if not v.get("fired", False)}
+        if not _pending:
+            await update.message.reply_text("No pending reminders to cancel.")
+            return
+        _keyword = (intent_data.get("reminder_message") or "").lower()
+        _cancelled = []
+        _scheduler = context.application.bot_data.get("scheduler")
+        for _rid, _r in _pending.items():
+            if not _keyword or _keyword in _r.get("message", "").lower():
+                _del_rem(_rid)
+                if _scheduler:
+                    try: _scheduler.remove_job(_rid)
+                    except Exception: pass
+                _cancelled.append(_rid)
+        if _cancelled:
+            await update.message.reply_text(f"🗑 Cancelled {len(_cancelled)} reminder(s).")
+        else:
+            await update.message.reply_text("No matching reminders found. Use 'show reminders' to see all.")
 
     elif intent == "news":
         explicit_triggers = [
