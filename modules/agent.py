@@ -26,6 +26,57 @@ from .utils import (
 )
 from .skills_loader import load_skills, list_skills, get_skill_token_estimate
 
+def _build_quiz_status_text() -> str:
+    """Build a real-time quiz status block for the system prompt."""
+    try:
+        import pytz
+        from modules.quiz import load_quiz_state
+        state = load_quiz_state()
+        now_myt = datetime.now(pytz.timezone('Asia/Kuala_Lumpur'))
+        lines = ["QUIZ STATUS:"]
+        for quiz_key, label in [("ai_quiz", "AI Quiz"), ("python_quiz", "Python Quiz")]:
+            s = state[quiz_key]
+            pending = s.get("pending", False)
+            sent_at_str = s.get("sent_at")
+            questions = s.get("questions", [])
+            current_index = s.get("current_index", 0)
+            if pending and sent_at_str:
+                try:
+                    sent_at = datetime.fromisoformat(sent_at_str)
+                    # sent_at is naive local MYT time
+                    if sent_at.tzinfo is None:
+                        sent_at = pytz.timezone('Asia/Kuala_Lumpur').localize(sent_at)
+                    answer_at = sent_at + timedelta(minutes=30)
+                    remaining_sec = (answer_at - now_myt).total_seconds()
+                    if remaining_sec > 0:
+                        remaining_min = int(remaining_sec // 60)
+                        remaining_str = f"{remaining_min}min remaining"
+                    else:
+                        remaining_str = "overdue (posting soon)"
+                    answer_time_str = answer_at.strftime("%H:%M MYT")
+                    lines.append(
+                        f"- {label}: PENDING | {len(questions)} questions | "
+                        f"answered {current_index}/{len(questions)} | "
+                        f"sent {sent_at.strftime('%H:%M MYT')} | "
+                        f"auto-answer at {answer_time_str} ({remaining_str})"
+                    )
+                except Exception:
+                    lines.append(f"- {label}: PENDING (time unknown)")
+            else:
+                last = s.get("last_completed")
+                if last and last.get("completed_at"):
+                    try:
+                        completed_at = datetime.fromisoformat(last["completed_at"])
+                        lines.append(f"- {label}: not pending | last completed {completed_at.strftime('%d %b %H:%M MYT')}")
+                    except Exception:
+                        lines.append(f"- {label}: not pending")
+                else:
+                    lines.append(f"- {label}: not pending")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"QUIZ STATUS: unavailable ({e})"
+
+
 def build_owner_system_prompt(user_id: str, text: str = "") -> str:
     """Build a rich, context-aware system prompt for the owner."""
     import pytz
@@ -35,6 +86,7 @@ def build_owner_system_prompt(user_id: str, text: str = "") -> str:
     now_utc8 = datetime.now(pytz.timezone('Asia/Kuala_Lumpur'))
     now = now_utc8.strftime("%A, %d %B %Y %H:%M (UTC+8)")
     skills_text = load_skills(scope="core")
+    quiz_status = _build_quiz_status_text()
 
     # Get core preferences only
     # (relevant memories added separately via get_relevant_memories())
@@ -58,6 +110,8 @@ You are ABbot - professional AI agent.
 
 DATE/TIME: {now}
 When Joe uses words like "today", "yesterday", "now", "this morning", "last night", always resolve them relative to the DATE/TIME above. Never use training knowledge to guess the date.
+
+{quiz_status}
 
 PENDING TASKS:
 {tasks_text}
@@ -1061,34 +1115,109 @@ async def fire_reminder(
         reminder_id: str,
         chat_id: int,
         message: str):
-    """Fire reminder and auto-delete."""
+    """Fire reminder; escalate if max_escalations > 0."""
     from modules.reminders import (
         _load_reminders,
         delete_reminder,
+        update_reminder_fields,
     )
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     try:
         reminders = _load_reminders()
         reminder = reminders.get(reminder_id)
         if not reminder:
-            logger.warning(
-                f"Reminder {reminder_id} not found"
-            )
+            logger.warning(f"Reminder {reminder_id} not found")
             return
-        await bot.send_message(
-            chat_id=chat_id,
-            text=message
-        )
-        logger.info(
-            f"Fired reminder: {reminder_id}")
-        if reminder.get("auto_delete", True):
-            delete_reminder(reminder_id)
-            logger.info(
-                f"Auto-deleted: {reminder_id}")
+
+        max_esc = reminder.get("max_escalations", 0)
+        interval = reminder.get("escalation_interval_minutes", 10)
+
+        if max_esc > 0:
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Done", callback_data=f"ack:{reminder_id}"),
+                InlineKeyboardButton("⏰ +10min", callback_data=f"snooze:{reminder_id}"),
+            ]])
+            await bot.send_message(chat_id=chat_id, text=message, reply_markup=keyboard)
+            next_esc_at = (datetime.now(timezone.utc) + timedelta(minutes=interval)).isoformat()
+            update_reminder_fields(
+                reminder_id,
+                pending_ack=True,
+                escalation_count=0,
+                next_escalation_at=next_esc_at,
+            )
+            scheduler = sys.modules['__main__'].scheduler
+            scheduler.add_job(
+                fire_escalation,
+                "date",
+                run_date=datetime.now(timezone.utc) + timedelta(minutes=interval),
+                args=[bot, reminder_id, 1],
+                id=f"esc_{reminder_id}_1",
+                replace_existing=True,
+            )
+            logger.info(f"Fired reminder {reminder_id}, escalation 1 in {interval}min")
+        else:
+            await bot.send_message(chat_id=chat_id, text=message)
+            logger.info(f"Fired reminder: {reminder_id}")
+            if reminder.get("auto_delete", True):
+                delete_reminder(reminder_id)
+                logger.info(f"Auto-deleted: {reminder_id}")
     except Exception as e:
-        logger.error(
-            f"Fire reminder error "
-            f"{reminder_id}: {e}"
-        )
+        logger.error(f"Fire reminder error {reminder_id}: {e}")
+
+
+async def fire_escalation(bot, reminder_id: str, escalation_num: int):
+    """Escalate an unacknowledged reminder with increasing urgency."""
+    from modules.reminders import (
+        _load_reminders,
+        delete_reminder,
+        update_reminder_fields,
+    )
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    try:
+        reminders = _load_reminders()
+        reminder = reminders.get(reminder_id)
+        if not reminder or not reminder.get("pending_ack", False):
+            logger.info(f"Escalation {reminder_id} #{escalation_num} skipped (already acked/deleted)")
+            return
+
+        chat_id = reminder["chat_id"]
+        original_msg = reminder["message"]
+        max_esc = reminder.get("max_escalations", 3)
+        interval = reminder.get("escalation_interval_minutes", 10)
+
+        if escalation_num >= max_esc:
+            final_msg = f"‼️ Final reminder ‼️\n\n{original_msg}\n\n(No more reminders after this)"
+            await bot.send_message(chat_id=chat_id, text=final_msg)
+            delete_reminder(reminder_id)
+            logger.info(f"Final escalation fired for {reminder_id}, deleted")
+        else:
+            urgency = "⚠️" * min(escalation_num + 1, 3)
+            esc_msg = f"{urgency} Reminder #{escalation_num + 1}\n\n{original_msg}"
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Done", callback_data=f"ack:{reminder_id}"),
+                InlineKeyboardButton("⏰ +10min", callback_data=f"snooze:{reminder_id}"),
+            ]])
+            await bot.send_message(chat_id=chat_id, text=esc_msg, reply_markup=keyboard)
+
+            next_esc_at = (datetime.now(timezone.utc) + timedelta(minutes=interval)).isoformat()
+            update_reminder_fields(
+                reminder_id,
+                escalation_count=escalation_num,
+                next_escalation_at=next_esc_at,
+            )
+            scheduler = sys.modules['__main__'].scheduler
+            next_num = escalation_num + 1
+            scheduler.add_job(
+                fire_escalation,
+                "date",
+                run_date=datetime.now(timezone.utc) + timedelta(minutes=interval),
+                args=[bot, reminder_id, next_num],
+                id=f"esc_{reminder_id}_{next_num}",
+                replace_existing=True,
+            )
+            logger.info(f"Escalation {escalation_num} fired for {reminder_id}, next in {interval}min")
+    except Exception as e:
+        logger.error(f"Escalation error {reminder_id} #{escalation_num}: {e}")
 
 
 async def handle_delete_reply(update, context):

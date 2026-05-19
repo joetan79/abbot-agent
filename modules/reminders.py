@@ -21,7 +21,9 @@ def save_reminder(
         message: str,
         fire_at: datetime,
         reminder_type: str = "general",
-        auto_delete: bool = True) -> bool:
+        auto_delete: bool = True,
+        max_escalations: int = 3,
+        escalation_interval_minutes: int = 10) -> bool:
     try:
         reminders = _load_reminders()
         reminders[reminder_id] = {
@@ -33,6 +35,11 @@ def save_reminder(
             "created_at": datetime.now(
                 timezone.utc).isoformat(),
             "fired": False,
+            "max_escalations": max_escalations,
+            "escalation_interval_minutes": escalation_interval_minutes,
+            "pending_ack": False,
+            "escalation_count": 0,
+            "next_escalation_at": None,
         }
         _save_reminders(reminders)
         logger.info(
@@ -92,6 +99,19 @@ def delete_reminders_by_type(
         f"{reminder_type} reminders"
     )
     return len(to_delete)
+
+
+def update_reminder_fields(reminder_id: str, **fields) -> bool:
+    try:
+        reminders = _load_reminders()
+        if reminder_id not in reminders:
+            return False
+        reminders[reminder_id].update(fields)
+        _save_reminders(reminders)
+        return True
+    except Exception as e:
+        logger.error(f"Update reminder fields error: {e}")
+        return False
 
 
 def _load_reminders() -> dict:

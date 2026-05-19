@@ -15,6 +15,7 @@ SKILL_PRIORITY = [
     "agent_behavior",        # core behavior
     "response_style",        # formatting
     "chinese_traditional",   # language rules
+    "quiz_behavior",         # quiz system rules
     "news_reporting",        # domain specific
     "crypto_reporting",      # domain specific
     "weather_reporting",     # domain specific
@@ -39,6 +40,7 @@ def load_skills(scope: str = "all") -> str:
             "agent_behavior",
             "response_style",
             "chinese_traditional",
+            "quiz_behavior",
         ],
         "news": [
             "communication_style",

@@ -10,6 +10,7 @@ from telegram import Update, BotCommand
 from telegram.ext import (
     Application, CommandHandler,
     MessageHandler, ContextTypes, filters,
+    CallbackQueryHandler,
 )
 from modules.utils import handle_photo
 from modules import gmail_monitor
@@ -27,6 +28,7 @@ from modules.agent import (
     cmd_tasks, cmd_schedules, cmd_memory, cmd_news, cmd_xfeed, cmd_report, cmd_skills,
     cmd_memories, cmd_forget,
     handle_delete_last, fire_scheduled_deletion,
+    fire_escalation,
 )
 
 logging.basicConfig(
@@ -186,28 +188,50 @@ def restore_reminders(scheduler, bot):
     expired = 0
     for rid, reminder in reminders.items():
         try:
-            fire_at_str = reminder.get(
-                "fire_at", "")
-            if not fire_at_str:
-                continue
-            fire_at = datetime.fromisoformat(
-                fire_at_str)
-            if fire_at.tzinfo is None:
-                fire_at = fire_at.replace(
-                    tzinfo=timezone.utc)
             chat_id = reminder.get("chat_id")
             message = reminder.get("message", "")
+
+            # Restore pending escalations (reminder already fired, awaiting ack)
+            if reminder.get("pending_ack", False):
+                escalation_count = reminder.get("escalation_count", 0)
+                max_esc = reminder.get("max_escalations", 3)
+                next_num = escalation_count + 1
+                if next_num > max_esc:
+                    delete_reminder(rid)
+                    expired += 1
+                    continue
+                next_at_str = reminder.get("next_escalation_at")
+                if next_at_str:
+                    next_at = datetime.fromisoformat(next_at_str)
+                    if next_at.tzinfo is None:
+                        next_at = next_at.replace(tzinfo=timezone.utc)
+                else:
+                    next_at = now
+                run_date = max(next_at, now + timedelta(seconds=30))
+                scheduler.add_job(
+                    fire_escalation,
+                    "date",
+                    run_date=run_date,
+                    args=[bot, rid, next_num],
+                    id=f"esc_{rid}_{next_num}",
+                    replace_existing=True,
+                )
+                restored += 1
+                continue
+
+            fire_at_str = reminder.get("fire_at", "")
+            if not fire_at_str:
+                continue
+            fire_at = datetime.fromisoformat(fire_at_str)
+            if fire_at.tzinfo is None:
+                fire_at = fire_at.replace(tzinfo=timezone.utc)
             if fire_at <= now:
-                if fire_at >= now - timedelta(
-                        hours=2):
+                if fire_at >= now - timedelta(hours=2):
                     scheduler.add_job(
                         fire_reminder,
                         "date",
-                        run_date=now + timedelta(
-                            seconds=10),
-                        args=[bot, rid,
-                              chat_id,
-                              f"(Delayed) {message}"],
+                        run_date=now + timedelta(seconds=10),
+                        args=[bot, rid, chat_id, f"(Delayed) {message}"],
                         id=f"delayed_{rid}",
                         replace_existing=True,
                     )
@@ -219,19 +243,14 @@ def restore_reminders(scheduler, bot):
                     fire_reminder,
                     "date",
                     run_date=fire_at,
-                    args=[bot, rid,
-                          chat_id, message],
+                    args=[bot, rid, chat_id, message],
                     id=rid,
                     replace_existing=True,
                 )
                 restored += 1
         except Exception as e:
-            logger.error(
-                f"Restore reminder error "
-                f"{rid}: {e}")
-    logger.info(
-        f"Reminders restored={restored} "
-        f"expired={expired}")
+            logger.error(f"Restore reminder error {rid}: {e}")
+    logger.info(f"Reminders restored={restored} expired={expired}")
 
 
 def restore_scheduled_deletions(application, scheduler):
@@ -579,6 +598,66 @@ async def cmd_pending_deletes(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("\n".join(lines))
 
 
+async def handle_reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    await query.answer()
+
+    data = query.data
+    if data.startswith("ack:"):
+        reminder_id = data[4:]
+        from modules.reminders import delete_reminder, update_reminder_fields
+        update_reminder_fields(reminder_id, pending_ack=False)
+        sched = context.application.bot_data.get("scheduler")
+        if sched:
+            for i in range(1, 10):
+                try:
+                    sched.remove_job(f"esc_{reminder_id}_{i}")
+                except Exception:
+                    pass
+        delete_reminder(reminder_id)
+        try:
+            original = query.message.text or ""
+            await query.edit_message_text(text=f"{original}\n\n✅ Acknowledged!")
+        except Exception:
+            pass
+        logger.info(f"Reminder {reminder_id} acknowledged via button")
+
+    elif data.startswith("snooze:"):
+        reminder_id = data[7:]
+        from modules.reminders import _load_reminders, update_reminder_fields
+        reminders = _load_reminders()
+        reminder = reminders.get(reminder_id)
+        if not reminder:
+            await query.edit_message_text(text="Reminder already completed.")
+            return
+        escalation_count = reminder.get("escalation_count", 0)
+        next_num = escalation_count + 1
+        sched = context.application.bot_data.get("scheduler")
+        if sched:
+            try:
+                sched.remove_job(f"esc_{reminder_id}_{next_num}")
+            except Exception:
+                pass
+            snooze_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+            sched.add_job(
+                fire_escalation,
+                "date",
+                run_date=snooze_at,
+                args=[context.bot, reminder_id, next_num],
+                id=f"esc_{reminder_id}_{next_num}",
+                replace_existing=True,
+            )
+            update_reminder_fields(reminder_id, next_escalation_at=snooze_at.isoformat())
+        try:
+            original = query.message.text or ""
+            await query.edit_message_text(text=f"{original}\n\n⏰ Snoozed 10 minutes")
+        except Exception:
+            pass
+        logger.info(f"Reminder {reminder_id} snoozed 10min")
+
+
 async def error_handler(
         update: object,
         context: ContextTypes.DEFAULT_TYPE):
@@ -652,6 +731,7 @@ async def main():
     app.add_handler(CommandHandler("windows",        cmd_windows))
     app.add_handler(CommandHandler("deletelast",     cmd_delete_last))
     app.add_handler(CommandHandler("pendingdeletes", cmd_pending_deletes))
+    app.add_handler(CallbackQueryHandler(handle_reminder_callback, pattern=r"^(ack|snooze):"))
     app.add_error_handler(error_handler)
     await app.bot.set_my_commands([
         BotCommand("start",          "Welcome & help"),
