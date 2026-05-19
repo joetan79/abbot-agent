@@ -199,9 +199,10 @@ def parse_intent(text: str) -> dict:
     import pytz as _pytz
     _now = datetime.now(_pytz.timezone('Asia/Kuala_Lumpur'))
     _now_str = _now.strftime("%A, %d %B %Y %H:%M (UTC+8)")
-    system = f"""You are an intent parser for a personal AI agent Telegram bot.
-Current date and time: {_now_str}
-Parse the user message carefully and return ONLY valid JSON.
+    system = """You are an intent parser for a personal AI agent Telegram bot.
+Current date and time: __NOW__
+Parse the user message carefully and return ONLY valid JSON.""".replace("__NOW__", _now_str) + """
+
 You support English and Chinese (Traditional and Simplified) input.
 Parse the intent regardless of which language is used.
 
