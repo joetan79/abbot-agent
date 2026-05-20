@@ -1326,6 +1326,19 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
     text = original_text
     if update.message.reply_to_message:
         replied = update.message.reply_to_message
+
+        # If the replied-to message was a bot image analysis, re-analyse the original photo
+        from modules.utils import photo_cache_get, photo_cache_set, handle_photo_reanalysis
+        cached_file_id = photo_cache_get(replied.message_id)
+        if cached_file_id and original_text.strip():
+            await update.message.chat.send_action("typing")
+            reply = await handle_photo_reanalysis(context.bot, cached_file_id, original_text)
+            from modules.message_manager import track_bot_message
+            sent_msg = await update.message.reply_text(f"🖼 {reply}")
+            track_bot_message(update.effective_chat.id, sent_msg.message_id)
+            photo_cache_set(sent_msg.message_id, cached_file_id)
+            return
+
         replied_text = (replied.text or replied.caption or "").strip()
         if replied_text:
             if len(replied_text) > 400:

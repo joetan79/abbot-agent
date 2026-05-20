@@ -5,26 +5,60 @@ from telegram.ext import ContextTypes
 from .utils import ask_claude, ask_claude_with_search, is_allowed, MODEL_SMART
 from .skills_loader import load_skills
 
-USER_PROFILES = {
-    # Add Telegram usernames here
-    # Format: "username": {"role": "student",
-    #                      "level": "secondary"}
+# Known family/group members keyed by Telegram username (lowercase).
+# Add new members here as they join the group.
+FAMILY_MEMBERS = {
+    "jtan79": {
+        "name": "Joe",
+        "role": "dad",
+        "is_owner": True,
+    },
+    "it1019": {
+        "name": "Isaac",
+        "role": "son",
+        "age": 10,
+        "level": "primary",
+    },
+    # Arik's username unknown yet — add when confirmed
 }
 
+# Human-readable family context injected into every non-owner system prompt
+_FAMILY_CONTEXT = (
+    "GROUP CONTEXT: This is a family group chat. Members:\n"
+    "- Joe (username: JTan79) — dad, the bot owner\n"
+    "- Isaac (username: IT1019) — Joe's 10-year-old son, primary school student\n"
+    "- Arik — Joe's 6-year-old son (may join later)\n"
+    "- Fiona — Joe's wife\n"
+    "Never confuse the person currently messaging you with another family member."
+)
+
+USER_PROFILES = {}  # kept for backward-compat with cmd_* handlers
+
+
 def _get_user_context(username: str) -> str:
-    profile = USER_PROFILES.get(
-        (username or "").lower())
-    if profile:
-        role = profile.get("role", "user")
-        level = profile.get("level", "")
-        if role == "student" and level:
-            return (
-                f"You are helping a {level} "
-                "level student. Explain clearly "
-                "at appropriate level."
-            )
-        return f"You are helping a {role}."
-    return "You are a professional AI assistant."
+    key = (username or "").lower()
+    member = FAMILY_MEMBERS.get(key)
+    if member:
+        name = member["name"]
+        role = member.get("role", "member")
+        age = member.get("age")
+        level = member.get("level", "")
+        age_str = f", {age} years old" if age else ""
+        level_str = f" ({level} school level)" if level else ""
+        return (
+            f"IMPORTANT: The person messaging you RIGHT NOW is {name.upper()} "
+            f"— Joe's {role}{age_str}{level_str}. "
+            f"Address them as {name}, not as Joe or anyone else.\n\n"
+            f"{_FAMILY_CONTEXT}\n\n"
+            f"Respond in a friendly, age-appropriate way for {name}."
+        )
+    # Unknown sender — still provide family context so the bot understands the group
+    display = username or "someone"
+    return (
+        f"The person messaging you is @{display} (not yet in the known member list).\n\n"
+        f"{_FAMILY_CONTEXT}\n\n"
+        "Be friendly and helpful."
+    )
 
 async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return

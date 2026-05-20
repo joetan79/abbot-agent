@@ -12,7 +12,7 @@ from telegram.ext import (
     MessageHandler, ContextTypes, filters,
     CallbackQueryHandler,
 )
-from modules.utils import handle_photo
+from modules.utils import handle_photo, photo_cache_set
 from modules import gmail_monitor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -375,7 +375,8 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         caption = caption.replace(f"@{context.bot.username}", "").strip()
 
     reply = await handle_photo(context.bot, msg.photo, caption)
-    await msg.reply_text(f"🖼 {reply}")
+    sent = await msg.reply_text(f"🖼 {reply}")
+    photo_cache_set(sent.message_id, msg.photo[-1].file_id)
 
 async def cmd_clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear conversation history for fresh start."""

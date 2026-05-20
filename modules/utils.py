@@ -217,6 +217,7 @@ CACHE_FILE              = DATA_DIR / "news_cache.json"
 PUBLISHED_ARTICLES_FILE = DATA_DIR / "published_articles.json"
 ARTICLE_STATS_FILE      = DATA_DIR / "article_stats.json"
 TIME_WINDOWS_FILE = DATA_DIR / "time_windows.json"
+PHOTO_CACHE_FILE  = DATA_DIR / "photo_cache.json"
 DATA_DIR.mkdir(exist_ok=True)
 
 DEFAULT_TIME_WINDOWS = {
@@ -689,6 +690,61 @@ async def handle_photo(bot, photo, caption: str = "") -> str:
     except Exception as e:
         logger.error(f"Photo handling error: {e}")
         return "Sorry, I couldn't process that image. Please try again."
+
+
+def photo_cache_set(message_id: int, file_id: str):
+    cache = _load(PHOTO_CACHE_FILE)
+    cache[str(message_id)] = file_id
+    # Keep at most 200 entries to avoid unbounded growth
+    if len(cache) > 200:
+        oldest_keys = list(cache.keys())[:-200]
+        for k in oldest_keys:
+            del cache[k]
+    _save(PHOTO_CACHE_FILE, cache)
+
+
+def photo_cache_get(message_id: int) -> str | None:
+    cache = _load(PHOTO_CACHE_FILE)
+    return cache.get(str(message_id))
+
+
+async def handle_photo_reanalysis(bot, file_id: str, user_question: str) -> str:
+    """Re-analyze a cached photo with a follow-up question or correction."""
+    try:
+        import base64
+        import httpx
+        file = await bot.get_file(file_id)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(file.file_path)
+            image_data = base64.standard_b64encode(response.content).decode("utf-8")
+
+        prompt = (
+            f"The user has a follow-up about this image:\n\n{user_question}\n\n"
+            "Please look at the image carefully and answer accurately."
+        )
+        r = claude.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1500,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": image_data,
+                        },
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+        return r.content[0].text
+    except Exception as e:
+        logger.error(f"Photo re-analysis error: {e}")
+        return "Sorry, I couldn't re-analyse that image. Please try again."
+
 
 # ── Conversation History ──────────────────────────────────────────────────────
 HISTORY_FILE = DATA_DIR / "history.json"
