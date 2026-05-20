@@ -2086,7 +2086,7 @@ async def cmd_schedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=None)
 
 async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_chat.id): return
+    if not is_owner(update.effective_user.id if update.effective_user else 0): return
     mem = memory_all()
     if not mem:
         await update.message.reply_text("🧠 Nothing in memory yet.\n\nTry: _remember my city is Kuala Lumpur_", parse_mode=None)
@@ -2103,7 +2103,7 @@ async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_xfeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fetch AI Pulse & Updates. Accepts optional args: /xfeed [hours] [count]"""
-    if not is_owner(update.effective_chat.id):
+    if not is_owner(update.effective_user.id if update.effective_user else 0):
         return
 
     # Parse optional arguments: /xfeed [Nh] [count]
@@ -2208,12 +2208,12 @@ async def cmd_xfeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ X feed error: {e}")
 
 async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_chat.id): return
+    if not is_owner(update.effective_user.id if update.effective_user else 0): return
     await update.message.chat.send_action("typing")
     await run_scheduled_job(context.bot, "manual_report", "daily_report")
 
 async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_chat.id): return
+    if not is_owner(update.effective_user.id if update.effective_user else 0): return
     skills = list_skills()
     estimates = get_skill_token_estimate()
 
@@ -2243,7 +2243,7 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_memories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show all memories organized by category."""
-    if not is_owner(update.effective_chat.id):
+    if not is_owner(update.effective_user.id if update.effective_user else 0):
         return
 
     categorized = memory_get_all_categorized()
@@ -2317,7 +2317,7 @@ async def cmd_memories(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Delete a specific memory entry."""
-    if not is_owner(update.effective_chat.id):
+    if not is_owner(update.effective_user.id if update.effective_user else 0):
         return
 
     key = " ".join(context.args).strip()

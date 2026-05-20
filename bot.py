@@ -49,7 +49,7 @@ application = None
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return
-    if is_owner(update.effective_chat.id):
+    if is_owner(update.effective_user.id if update.effective_user else 0):
         msg = (
             "ABbot - Professional AI Agent\n\n"
             "Commands:\n"
@@ -150,7 +150,8 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         full_context = text
 
     try:
-        if is_private and is_owner(chat_id):
+        sender_id = update.effective_user.id if update.effective_user else 0
+        if is_owner(sender_id):
             await handle_owner_message(update, context)
             return
 
@@ -378,14 +379,14 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def cmd_clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear conversation history for fresh start."""
-    if not is_owner(update.effective_chat.id): return
+    if not is_owner(update.effective_user.id if update.effective_user else 0): return
     from modules.utils import history_clear
     user_id = str(update.effective_user.id)
     history_clear(user_id)
     await update.message.reply_text("Memory cleared! Fresh start. 🧹")
 
 async def cmd_feedhealth(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_chat.id):
+    if not is_owner(update.effective_user.id if update.effective_user else 0):
         return
     await update.message.chat.send_action("typing")
     from modules.rssfeed import check_feed_health
@@ -411,7 +412,7 @@ async def cmd_feedhealth(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_newsstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_chat.id):
+    if not is_owner(update.effective_user.id if update.effective_user else 0):
         return
     from modules.utils import get_published_count
     count = get_published_count()
@@ -425,7 +426,7 @@ async def cmd_newsstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_reminders(
         update: Update,
         context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_chat.id):
+    if not is_owner(update.effective_user.id if update.effective_user else 0):
         return
     from modules.reminders import get_all_reminders
     reminders = get_all_reminders()
@@ -482,7 +483,7 @@ async def cmd_reminders(
 async def cmd_cancel_reminder(
         update: Update,
         context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_chat.id):
+    if not is_owner(update.effective_user.id if update.effective_user else 0):
         return
     rid = " ".join(context.args).strip()
     if not rid:
@@ -510,7 +511,7 @@ async def cmd_cancel_reminder(
 async def cmd_windows(
         update: Update,
         context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_chat.id):
+    if not is_owner(update.effective_user.id if update.effective_user else 0):
         return
     from modules.utils import (
         get_all_time_windows,
