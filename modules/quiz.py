@@ -81,7 +81,7 @@ def save_quiz_state(state, quiz_type):
 
 
 def generate_ai_quiz(recent_topics=None):
-    from modules.utils import ask_claude, MODEL_FAST
+    from modules.utils import ask_claude, MODEL_FAST, MODEL_SMART
     avoid = ""
     if recent_topics:
         avoid = (
@@ -99,14 +99,16 @@ def generate_ai_quiz(recent_topics=None):
         "Make it genuinely challenging and educational. Vary the topic each time."
         + avoid
     )
+    system = "You are a quiz generator. Output only valid JSON."
     try:
-        response = ask_claude("You are a quiz generator. Output only valid JSON.", prompt, model=MODEL_FAST)
+        response = ask_claude(system, prompt, model=MODEL_FAST)
         clean = response.strip().replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except Exception as e:
         logger.error(f"AI quiz generation failed: {e}")
         try:
-            response = ask_claude("You are a quiz generator. Output only valid JSON.", prompt, model=MODEL_FAST)
+            # Fallback to Sonnet — Haiku may be overloaded
+            response = ask_claude(system, prompt, model=MODEL_SMART)
             clean = response.strip().replace("```json", "").replace("```", "").strip()
             return json.loads(clean)
         except Exception as e2:
@@ -115,7 +117,7 @@ def generate_ai_quiz(recent_topics=None):
 
 
 def generate_python_mcq(recent_topics=None):
-    from modules.utils import ask_claude, MODEL_FAST
+    from modules.utils import ask_claude, MODEL_FAST, MODEL_SMART
     avoid = ""
     if recent_topics:
         avoid = (
@@ -134,14 +136,16 @@ def generate_python_mcq(recent_topics=None):
         "Make it genuinely challenging. Include short code snippets in the question when relevant."
         + avoid
     )
+    system = "You are a Python quiz generator. Output only valid JSON."
     try:
-        response = ask_claude("You are a Python quiz generator. Output only valid JSON.", prompt, model=MODEL_FAST)
+        response = ask_claude(system, prompt, model=MODEL_FAST)
         clean = response.strip().replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except Exception as e:
         logger.error(f"Python MCQ generation failed: {e}")
         try:
-            response = ask_claude("You are a Python quiz generator. Output only valid JSON.", prompt, model=MODEL_FAST)
+            # Fallback to Sonnet — Haiku may be overloaded
+            response = ask_claude(system, prompt, model=MODEL_SMART)
             clean = response.strip().replace("```json", "").replace("```", "").strip()
             return json.loads(clean)
         except Exception as e2:
@@ -150,7 +154,7 @@ def generate_python_mcq(recent_topics=None):
 
 
 def generate_python_coding(recent_topics=None):
-    from modules.utils import ask_claude, MODEL_FAST
+    from modules.utils import ask_claude, MODEL_FAST, MODEL_SMART
     avoid = ""
     if recent_topics:
         avoid = (
@@ -167,14 +171,16 @@ def generate_python_coding(recent_topics=None):
         '"explanation": "Brief explanation of the approach and key concepts used."}'
         + avoid
     )
+    system = "You are a Python coding challenge generator. Output only valid JSON."
     try:
-        response = ask_claude("You are a Python coding challenge generator. Output only valid JSON.", prompt, model=MODEL_FAST)
+        response = ask_claude(system, prompt, model=MODEL_FAST)
         clean = response.strip().replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except Exception as e:
         logger.error(f"Python coding generation failed: {e}")
         try:
-            response = ask_claude("You are a Python coding challenge generator. Output only valid JSON.", prompt, model=MODEL_FAST)
+            # Fallback to Sonnet — Haiku may be overloaded
+            response = ask_claude(system, prompt, model=MODEL_SMART)
             clean = response.strip().replace("```json", "").replace("```", "").strip()
             return json.loads(clean)
         except Exception as e2:
@@ -282,6 +288,16 @@ async def send_quiz(bot, quiz_type):
     if not questions:
         try:
             await bot.send_message(chat_id=owner_chat_id, text="⚠️ Failed to generate quiz. Will retry next schedule.")
+        except Exception:
+            pass
+        try:
+            from modules.health_monitor import notify_error
+            await notify_error(
+                bot,
+                "quiz_fail",
+                f"Quiz generation failed ({quiz_type}) — all retries exhausted.\n"
+                "Likely cause: Anthropic API overloaded (529). Will retry at next scheduled time."
+            )
         except Exception:
             pass
         save_quiz_state(state[quiz_key], quiz_key)

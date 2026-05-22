@@ -151,6 +151,17 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         sender_id = update.effective_user.id if update.effective_user else 0
+        sender_name = (
+            update.effective_user.first_name
+            or update.effective_user.username
+            or "Someone"
+        )
+
+        # Record every message to the group thread buffer (owner messages too)
+        if not msg.chat.type == "private":
+            from modules.group_context import record_message
+            record_message(chat_id, sender_name, text)
+
         if is_owner(sender_id):
             await handle_owner_message(update, context)
             return
@@ -158,18 +169,27 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username = update.effective_user.username or ""
         user_id = str(update.effective_user.id)
         from modules.study import _get_user_context
+        from modules.group_context import get_context_str
         ctx = _get_user_context(username)
         prefs = get_preferences_prompt()
+        thread = get_context_str(chat_id, exclude_sender=sender_name)
+        thread_section = f"\n\n{thread}" if thread else ""
         system = (
-            f"{ctx}\n{prefs}\n"
+            f"{ctx}\n{prefs}{thread_section}\n\n"
             "Be friendly and encouraging. "
-            "If the user is replying to a previous message, "
-            "use that context to give a relevant answer."
+            "Use the recent group conversation above (if any) to give context-aware replies."
         )
         await msg.chat.send_action("typing")
-        await msg.reply_text(
-            ask_claude_with_history(system, full_context, user_id, model=MODEL_SMART, history_text=text)
-        )
+        reply = ask_claude_with_history(system, full_context, user_id, model=MODEL_SMART, history_text=text)
+        await msg.reply_text(reply)
+
+        # Log interaction for daily family digest
+        try:
+            from modules.insights import log_interaction
+            log_interaction(sender_name, text, reply)
+        except Exception:
+            pass
+
     except Exception as e:
         logger.error(f"route_message error: {e}")
         try:
@@ -701,6 +721,30 @@ async def main():
         id="gmail_monitor",
         replace_existing=True,
         next_run_time=datetime.now(timezone.utc),
+    )
+    from modules.health_monitor import run_api_fail_check, run_weekly_analysis
+    scheduler.add_job(
+        run_api_fail_check,
+        "interval",
+        minutes=10,
+        args=[app.bot],
+        id="health_api_fail_check",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_weekly_analysis,
+        CronTrigger(day_of_week="mon", hour=9, minute=0),
+        args=[app.bot],
+        id="health_weekly_analysis",
+        replace_existing=True,
+    )
+    from modules.insights import send_daily_digest
+    scheduler.add_job(
+        send_daily_digest,
+        CronTrigger(hour=23, minute=0),
+        args=[app.bot],
+        id="family_daily_digest",
+        replace_existing=True,
     )
     scheduler.start()
     logger.info("⏰ Scheduler started")

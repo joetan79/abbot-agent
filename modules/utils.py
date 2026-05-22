@@ -161,6 +161,19 @@ def clean_response(text: str) -> str:
 
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
+# In-memory counter for API failures — read by the health monitor periodic check
+_api_fail_counts: dict[str, int] = {}
+
+def _record_api_fail(error_type: str):
+    _api_fail_counts[error_type] = _api_fail_counts.get(error_type, 0) + 1
+
+def get_and_reset_api_fails() -> dict[str, int]:
+    """Return current failure counts and reset them."""
+    counts = dict(_api_fail_counts)
+    _api_fail_counts.clear()
+    return counts
+
+
 def ask_claude(system: str, user_msg: str, max_tokens: int = 1500,
                model: str = None, max_retries: int = 2) -> str:
     if model is None:
@@ -182,18 +195,24 @@ def ask_claude(system: str, user_msg: str, max_tokens: int = 1500,
             if attempt < max_retries:
                 time.sleep(2)
                 continue
+            _record_api_fail("timeout")
             return "Sorry, response timed out. Please try again."
         except anthropic.RateLimitError:
             logger.warning("Rate limit hit")
             if attempt < max_retries:
                 time.sleep(5)
                 continue
+            _record_api_fail("rate_limit")
             return "Too many requests. Please wait a moment and try again."
         except Exception as e:
             logger.error(f"Claude error ({model}): {e}")
             if attempt < max_retries:
                 time.sleep(1)
                 continue
+            if "529" in str(e) or "overload" in str(e).lower():
+                _record_api_fail("overload_529")
+            else:
+                _record_api_fail("api_error")
             return "Sorry, I had trouble responding. Please try again."
     return "Sorry, please try again."
 
