@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 # Model selection
 MODEL_FAST    = "claude-haiku-4-5-20251001"   # Simple tasks
-MODEL_SMART   = "claude-sonnet-4-5"           # Complex tasks
+MODEL_SMART   = "claude-sonnet-4-5"            # Complex tasks + vision
 MODEL_PREMIUM = "claude-haiku-4-5-20251001"     # AI Pulse & Updates (xfeed)
 
 # ── Memory Categories ─────────────────────────────────────────────────────────
@@ -685,7 +685,7 @@ async def handle_photo(bot, photo, caption: str = "") -> str:
         
         # Send to Claude with vision
         r = claude.messages.create(
-            model="claude-sonnet-4-5",
+            model=MODEL_SMART,
             max_tokens=1500,
             messages=[{
                 "role": "user",
@@ -742,7 +742,7 @@ async def handle_photo_reanalysis(bot, file_id: str, user_question: str) -> str:
             "Please look at the image carefully and answer accurately."
         )
         r = claude.messages.create(
-            model="claude-sonnet-4-5",
+            model=MODEL_SMART,
             max_tokens=1500,
             messages=[{
                 "role": "user",
@@ -1110,7 +1110,7 @@ def ask_claude_news(system: str, user_msg: str, max_tokens: int = 1500) -> str:
     """Use Haiku model for news - much cheaper for high input token tasks like web search."""
     try:
         r = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=MODEL_FAST,
             max_tokens=max_tokens,
             system=system,
             tools=[{
