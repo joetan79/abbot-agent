@@ -817,7 +817,7 @@ def history_summary(user_id: str) -> str:
 def ask_claude_with_history(system: str, user_msg: str,
                              user_id: str, max_tokens: int = 1500,
                              model: str = None,
-                             max_retries: int = 2,
+                             max_retries: int = 1,
                              history_text: str = None) -> str:
     """Send message to Claude with full conversation history for context.
     history_text: if provided, saved to history instead of user_msg (keeps history clean of quoted-context prefixes)."""
@@ -833,7 +833,7 @@ def ask_claude_with_history(system: str, user_msg: str,
                 max_tokens=max_tokens,
                 system=system,
                 messages=messages,
-                timeout=30.0,
+                timeout=15.0,
             )
             response_text = r.content[0].text
             history_add(user_id, "user", save_text)
