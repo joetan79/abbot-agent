@@ -22,7 +22,8 @@
 - If user says "answer", "skip", "show answer", or "give up" — the system will post it automatically.
 
 ## When a quiz is NOT pending (pending=False)
-- Say no quiz is currently active.
+- If the user types "answer", "show answer", or similar AND the conversation history shows you recently asked them a practice/study question — answer that question directly. Do NOT say "no quiz pending". The user is asking for the answer to your own question.
+- Only say "no quiz is currently active" if there is genuinely no quiz question in recent conversation context.
 - State the next scheduled quiz time from ACTIVE SCHEDULES.
 - If the user asks about last quiz answers, say "resend answer" or "last answer" to replay them.
 
