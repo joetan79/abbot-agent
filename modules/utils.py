@@ -826,14 +826,14 @@ def ask_claude_with_history(system: str, user_msg: str,
     save_text = history_text if history_text is not None else user_msg
     for attempt in range(max_retries + 1):
         try:
-            history = history_get(user_id, limit=20)
+            history = history_get(user_id, limit=10)
             messages = history + [{"role": "user", "content": user_msg}]
             r = claude.messages.create(
                 model=model,
                 max_tokens=max_tokens,
                 system=system,
                 messages=messages,
-                timeout=15.0,
+                timeout=20.0,
             )
             response_text = r.content[0].text
             history_add(user_id, "user", save_text)
@@ -841,6 +841,7 @@ def ask_claude_with_history(system: str, user_msg: str,
             return response_text
         except anthropic.APITimeoutError:
             logger.warning(f"History timeout attempt {attempt+1}")
+            _record_api_fail("history_timeout")
             if attempt < max_retries:
                 time.sleep(2)
                 continue

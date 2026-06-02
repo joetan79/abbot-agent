@@ -6,6 +6,7 @@ Free, no API key, real-time updates.
 import re
 import html
 import time
+import calendar
 import email.utils
 import feedparser
 import logging
@@ -411,7 +412,7 @@ def parse_date(entry) -> datetime | None:
 
         if val is not None:
             try:
-                timestamp = time.mktime(val)
+                timestamp = calendar.timegm(val)
                 dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
                 if one_year_ago <= dt <= one_day_future:
                     return dt
