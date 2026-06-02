@@ -34,7 +34,7 @@ from modules.agent import (
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO,
-    handlers=[logging.FileHandler("bot.log")],
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
