@@ -35,7 +35,8 @@ DEFAULT_STATE = {
         "reminder_job_id": None,
         "day_counter": 0,
         "last_completed": None,
-        "sent_history": []
+        "sent_history": [],
+        "topics_override": None
     }
 }
 
@@ -63,6 +64,27 @@ def load_quiz_state():
         return data
     except Exception:
         return json.loads(json.dumps(DEFAULT_STATE))
+
+
+def set_python_quiz_topics(topics: str | None):
+    """Set or clear a temporary topic override for the Python quiz.
+    topics: comma-separated string e.g. 'numpy, pandas, matplotlib', or None to restore defaults.
+    """
+    full = _load_raw()
+    if "python_quiz" not in full:
+        full["python_quiz"] = DEFAULT_STATE["python_quiz"].copy()
+    full["python_quiz"]["topics_override"] = topics
+    path = QUIZ_STATE_FILE
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            json.dump(full, f, indent=2)
+            fcntl.flock(f, fcntl.LOCK_UN)
+        os.replace(tmp, path)
+        logger.info(f"[Quiz] Python quiz topics override set to: {topics!r}")
+    except Exception as e:
+        logger.error(f"Failed to save quiz topics override: {e}")
 
 
 def save_quiz_state(state, quiz_type):
@@ -118,6 +140,12 @@ def generate_ai_quiz(recent_topics=None):
 
 def generate_python_mcq(recent_topics=None):
     from modules.utils import ask_claude, MODEL_FAST, MODEL_SMART
+    state = load_quiz_state()
+    topics_override = state["python_quiz"].get("topics_override")
+    topics_str = topics_override if topics_override else (
+        "Python syntax, built-in functions, data structures, OOP, decorators, generators, "
+        "error handling, standard library, Pythonic idioms, list/dict comprehensions, performance tips"
+    )
     avoid = ""
     if recent_topics:
         avoid = (
@@ -126,9 +154,7 @@ def generate_python_mcq(recent_topics=None):
             + "\nGenerate a completely different topic."
         )
     prompt = (
-        "Generate a random Python multiple-choice quiz question. Topics: Python syntax, built-in functions, "
-        "data structures, OOP, decorators, generators, error handling, standard library, Pythonic idioms, "
-        "list/dict comprehensions, performance tips.\n\n"
+        f"Generate a random Python multiple-choice quiz question. Topics: {topics_str}.\n\n"
         "Respond ONLY in this exact JSON format with no markdown, no code blocks, no extra text:\n"
         '{"question": "Question text here? Include code snippet if relevant using \\n for newlines.", '
         '"options": {"A": "...", "B": "...", "C": "...", "D": "..."}, "answer": "B", '
@@ -155,6 +181,12 @@ def generate_python_mcq(recent_topics=None):
 
 def generate_python_coding(recent_topics=None):
     from modules.utils import ask_claude, MODEL_FAST, MODEL_SMART
+    state = load_quiz_state()
+    topics_override = state["python_quiz"].get("topics_override")
+    topics_str = topics_override if topics_override else (
+        "string manipulation, list/dict operations, algorithms, recursion, "
+        "file handling, decorators, comprehensions, sorting"
+    )
     avoid = ""
     if recent_topics:
         avoid = (
@@ -163,8 +195,7 @@ def generate_python_coding(recent_topics=None):
             + "\nGenerate a completely different topic."
         )
     prompt = (
-        "Generate a Python coding challenge. It should be solvable in 5-15 lines. Topics: string manipulation, "
-        "list/dict operations, algorithms, recursion, file handling, decorators, comprehensions, sorting.\n\n"
+        f"Generate a Python coding challenge. It should be solvable in 5-15 lines. Topics: {topics_str}.\n\n"
         "Respond ONLY in this exact JSON format with no markdown, no code blocks, no extra text:\n"
         '{"question": "Clearly describe the coding task. Include input/output examples.", '
         '"answer": "# Complete working Python solution\\ndef solution():\\n    pass", '

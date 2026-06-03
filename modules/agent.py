@@ -371,9 +371,23 @@ REMINDER EXAMPLES:
 "show my reminders" → {"intent":"reminder_list"}
 "cancel reminders" → {"intent":"reminder_cancel","reminder_message":null}
 
+QUIZ TOPIC RULES:
+- Return "quiz_set_topics" when user wants to change/set/replace the Python quiz topics temporarily.
+  Examples: "change python quiz to numpy pandas", "set python quiz topics to matplotlib", "replace python quiz with data science topics"
+  Extract the topics into "topics" field as a descriptive string.
+- Return "quiz_set_topics" with topics: "default" when user wants to restore original topics.
+  Examples: "restore python quiz", "reset python quiz topics", "go back to original python quiz"
+
+QUIZ TOPIC EXAMPLES:
+"change python quiz to numpy and pandas" → {"intent":"quiz_set_topics","topics":"numpy, pandas, array operations, dataframes, series, data manipulation"}
+"replace python quiz with matplotlib topics" → {"intent":"quiz_set_topics","topics":"matplotlib, pyplot, charts, plots, data visualization"}
+"set python quiz to data science topics" → {"intent":"quiz_set_topics","topics":"numpy, pandas, matplotlib, data analysis, data cleaning, EDA"}
+"restore python quiz to original" → {"intent":"quiz_set_topics","topics":"default"}
+"reset python quiz topics" → {"intent":"quiz_set_topics","topics":"default"}
+
 Return JSON:
 {
-  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, chat],
+  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, chat],
   "time": "HH:MM" or null,
   "frequency": "daily" or "weekly" or "once" or null,
   "day": day of week or null,
@@ -389,7 +403,8 @@ Return JSON:
   "fire_time": "HH:MM" for reminder at specific time or null,
   "fire_date": "today" or "tomorrow" or null,
   "delay_minutes": integer minutes for "in X minutes" reminders or null,
-  "reminder_message": what to remind about or null
+  "reminder_message": what to remind about or null,
+  "topics": quiz topics string for quiz_set_topics or null
 }
 Return ONLY the JSON object, no markdown, no explanation."""
     raw = ask_claude(system, text, max_tokens=300, model=MODEL_FAST)
@@ -1997,6 +2012,20 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(
                 f"Weather Report — {job_city}\n\n{msg}"
             )
+
+    elif intent == "quiz_set_topics":
+        from modules.quiz import set_python_quiz_topics
+        topics = intent_data.get("topics") or intent_data.get("action") or ""
+        topics = topics.strip()
+        if topics and topics.lower() not in ("none", "default", "restore", "reset", "original"):
+            set_python_quiz_topics(topics)
+            await update.message.reply_text(
+                f"✅ Python quiz topics updated to: *{topics}*\n\nAll upcoming scheduled quizzes will use these topics. Say 'restore python quiz topics' to go back to defaults.",
+                parse_mode="Markdown"
+            )
+        else:
+            set_python_quiz_topics(None)
+            await update.message.reply_text("✅ Python quiz topics restored to defaults.")
 
     elif intent == "report":
         await update.message.chat.send_action("typing")
