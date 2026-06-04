@@ -67,7 +67,27 @@ def _build_quiz_status_text() -> str:
                 if last and last.get("completed_at"):
                     try:
                         completed_at = datetime.fromisoformat(last["completed_at"])
-                        lines.append(f"- {label}: not pending | last completed {completed_at.strftime('%d %b %H:%M MYT')}")
+                        elapsed_h = (datetime.now() - completed_at).total_seconds() / 3600
+                        if elapsed_h < 3:
+                            questions = last.get("questions", [])
+                            lines.append(
+                                f"- {label}: completed {completed_at.strftime('%H:%M MYT')} "
+                                f"— RECENT Q&A (use this when user asks to explain, review, or asks about answers):"
+                            )
+                            for i, q in enumerate(questions, 1):
+                                q_num = q.get("sent_index", i)
+                                q_type = q.get("type", "mcq")
+                                ans_key = q.get("answer", "")
+                                opts = q.get("options", {})
+                                ans_text = opts.get(ans_key, "") if q_type != "coding" else "(see solution)"
+                                expl = q.get("explanation", "")[:150]
+                                lines.append(
+                                    f"  Q{q_num}: {q.get('question','')[:100]}\n"
+                                    f"  → Answer: {ans_key}) {ans_text}\n"
+                                    f"  → Explanation: {expl}"
+                                )
+                        else:
+                            lines.append(f"- {label}: not pending | last completed {completed_at.strftime('%d %b %H:%M MYT')}")
                     except Exception:
                         lines.append(f"- {label}: not pending")
                 else:
@@ -1356,6 +1376,8 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         replied_text = (replied.text or replied.caption or "").strip()
         if replied_text:
+            # Strip bot-generated timestamps to prevent Claude confusing them with current time
+            replied_text = re.sub(r'\n?_Generated:.*$', '', replied_text, flags=re.MULTILINE).strip()
             if len(replied_text) > 400:
                 replied_text = replied_text[:400] + "..."
             text = f'[Replying to: "{replied_text}"]\n\n{original_text}'
@@ -1413,6 +1435,63 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             _report = get_quiz_status_report()
             await update.message.reply_text(_report)
             return
+
+        # Explain quiz: serve full Q&A from disk — never relies on history
+        _explicit_explain_kws = [
+            "pls explain", "please explain", "explain all", "explain the quiz",
+            "explain quiz", "explain question", "explain q1", "explain q2",
+            "explain q3", "explain q4", "explain q5",
+            "actual answer", "correct answer", "answer to all", "answer for all",
+            "answer to these", "answer and explan", "answers and explan",
+            "give me the answer", "tell me the answer", "what are the answers",
+            "what is the answer", "what's the answer",
+        ]
+        _wants_explain_quiz = any(kw in _text_lower for kw in _explicit_explain_kws)
+
+        # "explanation" does not contain "explain" as substring — check separately
+        if not _wants_explain_quiz and "explanat" in _text_lower:
+            _wants_explain_quiz = True
+
+        # User replied to a quiz message → serve from disk regardless of keywords
+        if not _wants_explain_quiz and update.message.reply_to_message:
+            _rpl = (update.message.reply_to_message.text or "").lower()
+            if any(m in _rpl for m in ["python quiz", "ai knowledge quiz",
+                                        "reply with a, b, c", "❓ question", "question 1/"]):
+                _wants_explain_quiz = True
+
+        # bare "explain" — extended window to 3 hours (was 1h, quiz can be asked about later)
+        if not _wants_explain_quiz and "explain" in _text_lower:
+            for _qkey in ["python_quiz", "ai_quiz"]:
+                _last = _quiz_state[_qkey].get("last_completed")
+                if _last and _last.get("completed_at"):
+                    try:
+                        _elapsed = (datetime.now() - datetime.fromisoformat(_last["completed_at"])).total_seconds()
+                        if _elapsed < 10800:  # 3 hours
+                            _wants_explain_quiz = True
+                            break
+                    except Exception:
+                        pass
+        if _wants_explain_quiz:
+            from modules.quiz import format_last_quiz_explanation
+            _best_last, _best_time = None, None
+            for _qkey in ["python_quiz", "ai_quiz"]:
+                _last = _quiz_state[_qkey].get("last_completed")
+                if _last and _last.get("questions"):
+                    try:
+                        _t = datetime.fromisoformat(_last.get("completed_at", ""))
+                        if _best_time is None or _t > _best_time:
+                            _best_last, _best_time = _last, _t
+                    except Exception:
+                        if _best_last is None:
+                            _best_last = _last
+            if _best_last:
+                for _emsg in format_last_quiz_explanation(_best_last):
+                    try:
+                        await update.message.reply_text(_emsg, parse_mode="Markdown")
+                    except Exception:
+                        await update.message.reply_text(_emsg)
+                return
+
         for _qtype, _qkey in [("ai", "ai_quiz"), ("python", "python_quiz")]:
             if _quiz_state[_qkey]["pending"] or _wants_resend:
                 if await handle_quiz_response(context.bot, text, _qtype):

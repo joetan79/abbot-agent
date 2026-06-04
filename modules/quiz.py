@@ -668,6 +668,42 @@ async def handle_quiz_response(bot, text, quiz_type):
     return False
 
 
+def format_last_quiz_explanation(last_completed):
+    """Return a list of Telegram messages (header + one per question) for explain requests."""
+    questions = last_completed.get("questions", [])
+    if not questions:
+        return []
+    completed_at = last_completed.get("completed_at", "")
+    try:
+        dt = datetime.fromisoformat(completed_at)
+        header = f"📖 *Explanations* _(quiz at {dt.strftime('%H:%M')})_"
+    except Exception:
+        header = "📖 *Explanations*"
+    msgs = [header]
+    for i, q in enumerate(questions, 1):
+        q_num = q.get("sent_index", i)
+        q_type = q.get("type", "mcq")
+        question_text = q.get("question", "")
+        explanation = q.get("explanation", "No explanation available.")
+        if q_type == "coding":
+            answer = q.get("answer", "")
+            msgs.append(
+                f"*Q{q_num}:* {question_text}\n\n"
+                f"✅ *Solution:*\n```python\n{answer}\n```\n\n"
+                f"💡 {explanation}"
+            )
+        else:
+            answer_key = q.get("answer", "")
+            opts = q.get("options", {})
+            answer_text = opts.get(answer_key, "")
+            msgs.append(
+                f"*Q{q_num}:* {question_text}\n\n"
+                f"✅ *{answer_key}) {answer_text}*\n\n"
+                f"💡 {explanation}"
+            )
+    return msgs
+
+
 def _get_owner_chat_id():
     return int(os.getenv("OWNER_CHAT_ID", "0"))
 
