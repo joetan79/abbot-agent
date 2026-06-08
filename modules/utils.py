@@ -628,6 +628,11 @@ def get_relevant_memories(
         "\n".join(result_lines)
     )
 
+def schedule_next_id() -> str:
+    jobs = _load(SCHEDULE_FILE)
+    numeric_ids = [int(k) for k in jobs if k.isdigit()]
+    return str(max(numeric_ids, default=100) + 1)
+
 def schedule_save(job_id: str, data: dict):
     jobs = _load(SCHEDULE_FILE)
     jobs[job_id] = data
@@ -640,6 +645,22 @@ def schedule_delete(job_id: str):
     jobs = _load(SCHEDULE_FILE)
     jobs.pop(job_id, None)
     _save(SCHEDULE_FILE, jobs)
+
+def schedule_pause(job_id: str) -> bool:
+    jobs = _load(SCHEDULE_FILE)
+    if job_id not in jobs:
+        return False
+    jobs[job_id]["paused"] = True
+    _save(SCHEDULE_FILE, jobs)
+    return True
+
+def schedule_resume(job_id: str) -> bool:
+    jobs = _load(SCHEDULE_FILE)
+    if job_id not in jobs:
+        return False
+    jobs[job_id]["paused"] = False
+    _save(SCHEDULE_FILE, jobs)
+    return True
 
 def task_add(text: str) -> str:
     tasks = _load(TASKS_FILE)
@@ -984,6 +1005,36 @@ def ask_claude_with_search(system: str, user_msg: str,
             timeout=90.0,
         )
 
+        # Log block types for debugging
+        block_types = [getattr(b, "type", "?") for b in r.content]
+        logger.info(f"Web search stop_reason={r.stop_reason} blocks={block_types}")
+
+        # If model requested tool use but didn't finish (shouldn't happen with server tool),
+        # make a follow-up call to get the final answer
+        if r.stop_reason == "tool_use":
+            tool_results = []
+            for block in r.content:
+                if hasattr(block, "type") and block.type == "tool_use":
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": "Search executed."
+                    })
+            if tool_results:
+                messages = messages + [
+                    {"role": "assistant", "content": r.content},
+                    {"role": "user", "content": tool_results},
+                ]
+                r = claude.messages.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=system,
+                    tools=[{"type": "web_search_20250305", "name": "web_search"}],
+                    messages=messages,
+                    timeout=90.0,
+                )
+                logger.info(f"Web search follow-up stop_reason={r.stop_reason}")
+
         # Extract all text from response blocks
         full_response = ""
         for block in r.content:
@@ -1001,7 +1052,7 @@ def ask_claude_with_search(system: str, user_msg: str,
 
         return full_response or "Sorry, I could not find results for that."
     except Exception as e:
-        logger.error(f"Web search error: {e}")
+        logger.error(f"Web search error: {e}", exc_info=True)
         # Fallback to regular Claude without search
         return ask_claude(system, user_msg, max_tokens, model=model)
 

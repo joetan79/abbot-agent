@@ -324,6 +324,9 @@ def restore_schedules(scheduler, bot):
     from modules.quiz import _run_ai_quiz_sync, _run_python_quiz_sync
     jobs = schedule_load_all()
     for job_id, j in jobs.items():
+        if j.get("paused"):
+            logger.info(f"[SCHEDULER] Skipping paused job: {job_id}")
+            continue
         try:
             h, m = map(int, j["time"].split(":"))
             freq = j.get("frequency", "daily")
@@ -364,6 +367,55 @@ def restore_schedules(scheduler, bot):
                 logger.info(f"Restored: {job_id} at {j['time']} ({freq})")
         except Exception as e:
             logger.error(f"Failed to restore {job_id}: {e}")
+
+async def handle_location_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.location:
+        return
+    if not is_owner(update.effective_user.id if update.effective_user else 0):
+        return
+
+    loc = update.message.location
+    lat, lon = loc.latitude, loc.longitude
+
+    from modules.utils import memory_set
+    import httpx
+
+    city_info = None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(
+                "https://nominatim.openstreetmap.org/reverse",
+                params={"lat": lat, "lon": lon, "format": "json"},
+                headers={"User-Agent": "ABbot/1.0"},
+            )
+            data = r.json()
+            addr = data.get("address", {})
+            city = (
+                addr.get("city") or addr.get("town") or
+                addr.get("municipality") or addr.get("suburb") or
+                addr.get("county") or ""
+            )
+            country = addr.get("country", "")
+            if city and country:
+                city_info = f"{city}, {country}"
+            elif data.get("display_name"):
+                # fallback: first two parts of display name
+                parts = data["display_name"].split(",")
+                city_info = ", ".join(p.strip() for p in parts[:2])
+    except Exception as e:
+        logger.warning(f"Reverse geocode failed: {e}")
+
+    if not city_info:
+        city_info = f"{lat:.4f}, {lon:.4f}"
+
+    memory_set("location_lat", str(lat))
+    memory_set("location_lon", str(lon))
+    memory_set("city", city_info)
+
+    await update.message.reply_text(
+        f"📍 Location saved: {city_info}\n({lat:.4f}, {lon:.4f})\n\nI'll use this for weather, restaurants, and other nearby queries."
+    )
+
 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.photo:
@@ -767,6 +819,7 @@ async def main():
     app.add_handler(CommandHandler("skills",    cmd_skills))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, route_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
+    app.add_handler(MessageHandler(filters.LOCATION, handle_location_message))
     app.add_handler(CommandHandler("clear",      cmd_clear_history))
     app.add_handler(CommandHandler("newsstatus", cmd_newsstatus))
     app.add_handler(CommandHandler("feedhealth", cmd_feedhealth))

@@ -16,7 +16,7 @@ from .utils import (
     get_topic_preferences, get_core_preferences, get_relevant_memories,
     history_add, history_get, history_clear, history_summary,
     auto_extract_memory,
-    schedule_save, schedule_load_all, schedule_delete,
+    schedule_save, schedule_load_all, schedule_delete, schedule_pause, schedule_resume, schedule_next_id,
     task_add, task_done, task_list, task_delete,
     OWNER_CHAT_ID,
     clean_response,
@@ -108,6 +108,20 @@ def build_owner_system_prompt(user_id: str, text: str = "") -> str:
     skills_text = load_skills(scope="core")
     quiz_status = _build_quiz_status_text()
 
+    # Episodic long-term memory
+    try:
+        from modules.episodic_memory import get_episodic_context
+        episodic_ctx = get_episodic_context()
+    except Exception:
+        episodic_ctx = ""
+
+    # Goals summary
+    try:
+        from modules.goals import get_goals_summary
+        goals_ctx = get_goals_summary()
+    except Exception:
+        goals_ctx = ""
+
     # Get core preferences only
     # (relevant memories added separately via get_relevant_memories())
     core_prefs = get_core_preferences()
@@ -116,8 +130,8 @@ def build_owner_system_prompt(user_id: str, text: str = "") -> str:
     tasks_text = "\n".join(f"- {t['text']}" for t in pending[:5]) or "No pending tasks"
 
     sched_text = "\n".join(
-        f"- {j['time']} ({j['frequency']}): {j['label'][:60]}"
-        for j in list(schedules.values())[:5]
+        f"- ID {jid} | {j['time']} ({j['frequency']}): {j['label'][:60]}{' [PAUSED]' if j.get('paused') else ''}"
+        for jid, j in list(schedules.items())[:8]
     ) or "No active schedules"
 
     return f"""CRITICAL: You are speaking with JOE — the owner of this bot. The person messaging you RIGHT NOW is Joe. Never call him Isaac, Arik, or any other name. Isaac and Arik are Joe's children — they are NOT in this conversation.
@@ -130,6 +144,10 @@ You are ABbot - professional AI agent.
 
 DATE/TIME: {now}
 When Joe uses words like "today", "yesterday", "now", "this morning", "last night", always resolve them relative to the DATE/TIME above. Never use training knowledge to guess the date.
+
+{episodic_ctx}
+
+{goals_ctx}
 
 {quiz_status}
 
@@ -391,6 +409,86 @@ REMINDER EXAMPLES:
 "show my reminders" → {"intent":"reminder_list"}
 "cancel reminders" → {"intent":"reminder_cancel","reminder_message":null}
 
+GOAL RULES:
+- "goal_add": user wants to add/set a goal or habit. Extract description into "action", frequency into "frequency" (daily/weekly).
+  Examples: "add goal: Python 30min daily", "I want to exercise 3x a week", "set goal read 1 paper weekly"
+- "goal_done": user marks a goal completed. Extract goal ID or keyword into "task_id".
+  Examples: "done goal g001", "completed Python practice", "mark g002 done"
+- "goal_list": user wants to see goals/progress.
+  Examples: "show my goals", "goal progress", "how am I doing on goals", "goal streak"
+- "goal_remove": user wants to remove a goal. Extract ID into "task_id".
+  Examples: "remove goal g001", "delete goal g002"
+
+GOAL EXAMPLES:
+"add goal Python practice 30 min daily" → {"intent":"goal_add","action":"Python practice 30 min","frequency":"daily"}
+"I want to exercise 3 times a week" → {"intent":"goal_add","action":"exercise","frequency":"weekly"}
+"done Python practice" → {"intent":"goal_done","task_id":"python practice"}
+"mark g001 done" → {"intent":"goal_done","task_id":"g001"}
+"show goals" → {"intent":"goal_list"}
+"remove g002" → {"intent":"goal_remove","task_id":"g002"}
+
+NEWS PREFERENCE RULES:
+- "news_pref_update": user reacts positively or negatively to a news source or topic.
+  Examples: "boring source", "skip techcrunch", "more openai news", "less crypto news", "love deeplearning.ai"
+  Extract: "key" = source name or topic, "value" = "like" or "dislike"
+
+NEWS PREFERENCE EXAMPLES:
+"skip techcrunch" → {"intent":"news_pref_update","key":"techcrunch","value":"dislike"}
+"more openai news" → {"intent":"news_pref_update","key":"openai","value":"like"}
+"boring source" → {"intent":"news_pref_update","key":"last_source","value":"dislike"}
+"less crypto news" → {"intent":"news_pref_update","key":"crypto","value":"dislike"}
+
+GOOGLE CALENDAR RULES:
+- "gcal_connect": user wants to connect/link Google Calendar.
+  Examples: "connect google calendar", "link my calendar", "setup calendar"
+- "gcal_auth_code": user is providing the OAuth code after visiting the auth URL.
+  Examples: "calendar code: 4/0Adeu5..." — extract code into "value"
+- "gcal_today": user wants to see today's calendar events.
+  Examples: "what's on my calendar", "show calendar today", "any meetings today"
+- "gcal_week": user wants this week's events.
+  Examples: "calendar this week", "what meetings do I have"
+- "gcal_add": user wants to add an event. Extract title into "action", time into "time", date if mentioned.
+  Examples: "add to calendar: dentist tomorrow 3pm"
+
+CALENDAR EXAMPLES:
+"connect google calendar" → {"intent":"gcal_connect"}
+"calendar code: 4/0Adeu5BxYz" → {"intent":"gcal_auth_code","value":"4/0Adeu5BxYz"}
+"what's on my calendar today" → {"intent":"gcal_today"}
+"calendar this week" → {"intent":"gcal_week"}
+"add to calendar dentist tomorrow 3pm" → {"intent":"gcal_add","action":"dentist","time":"15:00"}
+
+PLAN/BRIEFING RULES:
+- "plan_today": user wants a daily plan or focus suggestion.
+  Examples: "plan my day", "what should I focus on today", "give me today's plan"
+- "morning_briefing": user wants the morning briefing sent now.
+  Examples: "send morning briefing", "morning briefing now", "give me my briefing"
+- "episodic_memory": user asks what the bot knows/remembers about them.
+  Examples: "what do you know about me", "show your memory of me", "what have you learned"
+
+PLAN EXAMPLES:
+"plan my day" → {"intent":"plan_today"}
+"what should I focus on today" → {"intent":"plan_today"}
+"send morning briefing" → {"intent":"morning_briefing"}
+"what do you know about me" → {"intent":"episodic_memory"}
+
+SCHEDULE PAUSE/RESUME RULES:
+- Return "schedule_pause" when user wants to temporarily stop/pause/disable a schedule (without deleting it).
+  Examples: "pause news schedule", "pause the 7am weather", "stop the crypto report for now", "disable AI pulse schedule"
+  Extract the job_id or enough text to match it into "task_id".
+- Return "schedule_resume" when user wants to re-enable/resume/unpause a schedule.
+  Examples: "resume news schedule", "unpause the weather", "re-enable crypto report", "turn back on AI pulse"
+  Extract the job_id or enough text to match it into "task_id".
+
+SCHEDULE PAUSE/RESUME EXAMPLES:
+"pause the news schedule" → {"intent":"schedule_pause","task_id":"news"}
+"pause crypto report" → {"intent":"schedule_pause","task_id":"crypto"}
+"stop the 7am weather" → {"intent":"schedule_pause","task_id":"weather_0700"}
+"pause AI pulse" → {"intent":"schedule_pause","task_id":"AI_Pulse"}
+"resume news" → {"intent":"schedule_resume","task_id":"news"}
+"unpause crypto" → {"intent":"schedule_resume","task_id":"crypto"}
+"re-enable weather schedule" → {"intent":"schedule_resume","task_id":"weather"}
+"turn back on AI pulse" → {"intent":"schedule_resume","task_id":"AI_Pulse"}
+
 QUIZ TOPIC RULES:
 - Return "quiz_set_topics" when user wants to change/set/replace the Python quiz topics temporarily.
   Examples: "change python quiz to numpy pandas", "set python quiz topics to matplotlib", "replace python quiz with data science topics"
@@ -407,7 +505,7 @@ QUIZ TOPIC EXAMPLES:
 
 Return JSON:
 {
-  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, chat],
+  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, plan_today, morning_briefing, episodic_memory, chat],
   "time": "HH:MM" or null,
   "frequency": "daily" or "weekly" or "once" or null,
   "day": day of week or null,
@@ -734,6 +832,11 @@ async def run_scheduled_job(bot, job_id: str, action: str):
         msg = ask_claude_news(system, f"BTC ETH SOL live price USD right now {datetime.now().strftime('%B %d %Y %H:%M')}")
         msg = clean_response(msg)
         text = f"Crypto Snapshot\n\n{msg}"
+
+    elif action in ("morning_briefing", "morning briefing", "briefing"):
+        from modules.morning_briefing import send_morning_briefing
+        await send_morning_briefing(bot)
+        return
 
     elif action == "daily_report":
         tasks    = task_list()
@@ -1357,6 +1460,42 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     original_text = update.message.text or update.message.caption or ""
 
+    # ── WEB LEARNING APPROVAL INTERCEPT ──────────────────────────────────────
+    # Handle yes/no responses to pending web-learning approval prompts
+    try:
+        from modules.learner import (
+            get_pending_web_approvals, approve_learning, reject_learning,
+            approve_all_pending, reject_all_pending, log_learning,
+        )
+        _pending = get_pending_web_approvals()
+        if _pending:
+            _tl = original_text.lower().strip()
+            if any(kw in _tl for kw in ["yes save all", "approve all", "save all"]):
+                n = approve_all_pending()
+                from modules.utils import memory_set_categorized
+                for _e in _pending:
+                    memory_set_categorized("learned", _e["content"][:200])
+                await update.message.reply_text(f"✅ Saved {n} item(s) to memory.")
+                return
+            elif any(kw in _tl for kw in ["no skip all", "reject all", "skip all"]):
+                n = reject_all_pending()
+                await update.message.reply_text(f"👍 Dismissed {n} pending item(s).")
+                return
+            elif any(kw in _tl for kw in ["yes save", "save it", "remember it", "yes remember", "approve"]):
+                _e = _pending[-1]
+                approve_learning(_e["id"])
+                from modules.utils import memory_set_categorized
+                memory_set_categorized("learned", _e["content"][:200])
+                await update.message.reply_text("✅ Saved to memory.")
+                return
+            elif any(kw in _tl for kw in ["no skip", "skip it", "no thanks", "don't save", "reject"]):
+                reject_learning(_pending[-1]["id"])
+                await update.message.reply_text("👍 Got it, won't save that.")
+                return
+    except Exception as _le:
+        logger.error(f"[Learner] Approval intercept error: {_le}")
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Extract quoted/replied-to message and build context-aware text for Claude
     text = original_text
     if update.message.reply_to_message:
@@ -1539,28 +1678,15 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         time_str  = intent_data.get("time") or "08:00"
         frequency = intent_data.get("frequency") or "daily"
         action    = intent_data.get("action") or "chat"
-        job_id    = f"{action}_{time_str}".replace(":", "").replace(" ", "_")
+        job_id    = schedule_next_id()
         h, m      = map(int, time_str.split(":"))
-        # Save city specific to this job if mentioned
         job_city = intent_data.get("city")
-        if job_city:
-            memory_set(f"city_{job_id}", job_city)
         schedule_save(job_id, {
             "label": text[:80], "time": time_str,
             "frequency": frequency, "action": action,
             "city": job_city or memory_get("city", "Kuala Lumpur"),
             "created": datetime.now().isoformat(),
         })
-
-        city_msg = f"\nCity: {job_city}" if job_city else ""
-        await update.message.reply_text(
-            f"Scheduled!\n\n"
-            f"Task: {text[:80]}\n"
-            f"Time: {time_str} | Frequency: {frequency}"
-            f"{city_msg}\n"
-            f"ID: {job_id}\n\n"
-            f"Use /schedules to see all."
-        ) 
 
         scheduler = context.application.bot_data.get("scheduler")
         if scheduler:
@@ -1591,7 +1717,8 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         lines = ["📅 *Your Schedules:*\n"]
         for jid, j in jobs.items():
-            lines.append(f"• *{j['time']}* ({j['frequency']}) — {j['label']}\n  ID: `{jid}`")
+            status = "🟡" if j.get("paused") else ""
+            lines.append(f"• {status}*{j['time']}* ({j['frequency']}) — {j['label']}\n  ID: `{jid}`")
         await update.message.reply_text("\n".join(lines), parse_mode=None)
 
     elif intent == "schedule_summary":
@@ -1600,8 +1727,8 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("You have no schedules set yet.")
             return
         schedule_text = "\n".join(
-            f"- At {j['time']} ({j['frequency']}): {j['label']}"
-            for j in jobs.values()
+            f"- ID {jid} | {j['time']} ({j['frequency']}): {j['label']}{' [PAUSED]' if j.get('paused') else ''}"
+            for jid, j in jobs.items()
         )
         user_id = str(update.effective_user.id)
         system = build_owner_system_prompt(user_id, text)
@@ -1626,6 +1753,68 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"🗑 Schedule `{job_id}` removed.", parse_mode=None)
         else:
             await update.message.reply_text("Please give me the schedule ID. Use /schedules to see them.")
+
+    elif intent == "schedule_pause":
+        keyword = (intent_data.get("task_id") or "").lower()
+        if not keyword:
+            await update.message.reply_text("Which schedule? Use /schedules to see IDs.")
+            return
+        jobs = schedule_load_all()
+        matched = [jid for jid in jobs if keyword in jid.lower() or keyword in jobs[jid].get("label","").lower()]
+        if not matched:
+            await update.message.reply_text(f"No schedule matching '{keyword}'. Use /schedules to see IDs.")
+            return
+        scheduler = context.application.bot_data.get("scheduler")
+        paused = []
+        for jid in matched:
+            if not jobs[jid].get("paused"):
+                schedule_pause(jid)
+                if scheduler:
+                    try: scheduler.remove_job(jid)
+                    except Exception: pass
+                paused.append(jid)
+        if paused:
+            await update.message.reply_text(f"🟡Paused: {', '.join(f'`{j}`' for j in paused)}\n\nSay 'resume {keyword}' to re-enable.", parse_mode=None)
+        else:
+            await update.message.reply_text(f"Already paused: {', '.join(f'`{j}`' for j in matched)}", parse_mode=None)
+
+    elif intent == "schedule_resume":
+        keyword = (intent_data.get("task_id") or "").lower()
+        if not keyword:
+            await update.message.reply_text("Which schedule? Use /schedules to see IDs.")
+            return
+        jobs = schedule_load_all()
+        matched = [jid for jid in jobs if keyword in jid.lower() or keyword in jobs[jid].get("label","").lower()]
+        if not matched:
+            await update.message.reply_text(f"No schedule matching '{keyword}'. Use /schedules to see IDs.")
+            return
+        scheduler = context.application.bot_data.get("scheduler")
+        from modules.quiz import _run_ai_quiz_sync, _run_python_quiz_sync
+        resumed = []
+        for jid in matched:
+            if jobs[jid].get("paused"):
+                schedule_resume(jid)
+                j = jobs[jid]
+                try:
+                    h, m = map(int, j["time"].split(":"))
+                    freq = j.get("frequency", "daily")
+                    action = j.get("action", "chat")
+                    if scheduler:
+                        if "ai_quiz" in action:
+                            scheduler.add_job(_run_ai_quiz_sync, trigger=CronTrigger(hour=h, minute=m), id=jid, replace_existing=True)
+                        elif "python_quiz" in action:
+                            scheduler.add_job(_run_python_quiz_sync, trigger=CronTrigger(hour=h, minute=m), id=jid, replace_existing=True)
+                        elif freq == "daily":
+                            scheduler.add_job(run_scheduled_job, "cron", hour=h, minute=m, args=[context.bot, jid, action], id=jid, replace_existing=True)
+                        elif freq == "weekly" and j.get("day"):
+                            scheduler.add_job(run_scheduled_job, "cron", day_of_week=j["day"][:3].lower(), hour=h, minute=m, args=[context.bot, jid, action], id=jid, replace_existing=True)
+                    resumed.append(jid)
+                except Exception as e:
+                    logger.error(f"Failed to re-register {jid} on resume: {e}")
+        if resumed:
+            await update.message.reply_text(f"▶️ Resumed: {', '.join(f'`{j}`' for j in resumed)}", parse_mode=None)
+        else:
+            await update.message.reply_text(f"Already active: {', '.join(f'`{j}`' for j in matched)}", parse_mode=None)
 
     elif intent == "task_add":
         action = intent_data.get("action") or text
@@ -2110,6 +2299,192 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.chat.send_action("typing")
         await run_scheduled_job(context.bot, "manual_report", "daily_report")
 
+    # ── GOALS ──────────────────────────────────────────────────────────────────
+    elif intent == "goal_add":
+        from modules.goals import add_goal
+        desc = (intent_data.get("action") or "").strip()
+        freq = intent_data.get("frequency") or "daily"
+        if not desc:
+            await update.message.reply_text("What's the goal? e.g. 'add goal: Python practice 30 min daily'")
+            return
+        gid = add_goal(desc, freq)
+        await update.message.reply_text(f"🎯 Goal added!\n\n*{desc}* ({freq})\nID: `{gid}`\n\nSay 'done {gid}' when you complete it.", parse_mode="Markdown")
+
+    elif intent == "goal_done":
+        from modules.goals import log_completion, list_goals, get_streak
+        keyword = (intent_data.get("task_id") or "").lower().strip()
+        goals = list_goals()
+        matched = [g for g in goals if keyword in g["id"].lower() or keyword in g["description"].lower()]
+        if not matched:
+            await update.message.reply_text(f"No goal matching '{keyword}'. Say 'show goals' to see your list.")
+            return
+        g = matched[0]
+        log_completion(g["id"])
+        streak = get_streak(g["id"])
+        await update.message.reply_text(f"✅ Logged: *{g['description']}*\n🔥 Streak: {streak} day(s)", parse_mode="Markdown")
+
+    elif intent == "goal_list":
+        from modules.goals import list_goals, get_streak
+        goals = list_goals()
+        if not goals:
+            await update.message.reply_text("No active goals. Say 'add goal: [description] daily' to start one.")
+            return
+        lines = ["🎯 *Your Goals:*\n"]
+        for g in goals:
+            bar = "█" * g["this_week"] + "░" * max(0, g["target_per_week"] - g["this_week"])
+            lines.append(f"*{g['id']}* {g['description']}\n  {g['frequency']} | this week [{bar}] | streak 🔥{g['streak']}d")
+        await update.message.reply_text("\n\n".join(lines), parse_mode="Markdown")
+
+    elif intent == "goal_remove":
+        from modules.goals import remove_goal
+        gid = (intent_data.get("task_id") or "").strip()
+        if remove_goal(gid):
+            await update.message.reply_text(f"✅ Goal `{gid}` removed.")
+        else:
+            await update.message.reply_text(f"Goal `{gid}` not found.")
+
+    # ── NEWS PREFERENCES ───────────────────────────────────────────────────────
+    elif intent == "news_pref_update":
+        from modules.news_pref import update_source_pref, update_topic_pref
+        key = (intent_data.get("key") or "").strip().lower()
+        val = (intent_data.get("value") or "").lower()
+        delta = 1.0 if val == "like" else -1.0
+        if not key or key == "last_source":
+            await update.message.reply_text("Which source or topic? e.g. 'skip techcrunch' or 'more openai news'")
+            return
+        # Heuristic: if key looks like a domain/publication name → source pref, else topic
+        known_sources = ["techcrunch", "verge", "venturebeat", "bloomberg", "reuters",
+                         "zdnet", "openai", "deeplearning", "infoq", "arstechnica",
+                         "coindesk", "cointelegraph", "decrypt", "huggingface"]
+        if any(s in key for s in known_sources):
+            update_source_pref(key, delta)
+            action_word = "Boosted" if delta > 0 else "Reduced"
+            await update.message.reply_text(f"📰 {action_word} priority for *{key}*.", parse_mode="Markdown")
+        else:
+            update_topic_pref(key, delta)
+            action_word = "More" if delta > 0 else "Less"
+            await update.message.reply_text(f"📰 {action_word} *{key}* content in future news.", parse_mode="Markdown")
+
+    # ── GOOGLE CALENDAR ────────────────────────────────────────────────────────
+    elif intent == "gcal_connect":
+        from modules.gcal import is_available, get_auth_url
+        if not is_available():
+            await update.message.reply_text("Google Calendar packages not installed. Run: pip install google-api-python-client google-auth-oauthlib --break-system-packages")
+            return
+        auth_url = get_auth_url()
+        if not auth_url:
+            await update.message.reply_text(
+                "Missing Google credentials file.\n\n"
+                "Setup:\n1. Go to console.cloud.google.com\n2. Create a project → Enable Google Calendar API\n"
+                "3. Create OAuth2 credentials (Desktop app) → Download JSON\n"
+                "4. Save as `data/gcal_credentials.json`\n5. Say 'connect google calendar' again."
+            )
+            return
+        await update.message.reply_text(
+            f"🔗 Visit this URL to authorize:\n\n{auth_url}\n\n"
+            "After authorizing, paste the code back with:\n`calendar code: [paste code here]`",
+            parse_mode="Markdown"
+        )
+
+    elif intent == "gcal_auth_code":
+        from modules.gcal import complete_auth
+        code = (intent_data.get("value") or "").strip()
+        if not code:
+            await update.message.reply_text("Paste the code like: `calendar code: 4/0Adeu5...`", parse_mode="Markdown")
+            return
+        if complete_auth(code):
+            await update.message.reply_text("✅ Google Calendar connected! Say 'what's on my calendar today' to check.")
+        else:
+            await update.message.reply_text("❌ Auth failed — make sure you copied the full code.")
+
+    elif intent == "gcal_today":
+        from modules.gcal import is_connected, get_today_events
+        if not is_connected():
+            await update.message.reply_text("Google Calendar not connected. Say 'connect google calendar' to set it up.")
+            return
+        events = get_today_events()
+        if not events:
+            await update.message.reply_text("📅 No events on your calendar today.")
+        else:
+            lines = ["📅 *Today's Calendar:*\n"]
+            for e in events:
+                loc = f" @ {e['location']}" if e.get("location") else ""
+                lines.append(f"• {e['time']} — {e['title']}{loc}")
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    elif intent == "gcal_week":
+        from modules.gcal import is_connected, get_week_events
+        if not is_connected():
+            await update.message.reply_text("Google Calendar not connected. Say 'connect google calendar' to set it up.")
+            return
+        events = get_week_events()
+        if not events:
+            await update.message.reply_text("📅 No upcoming events this week.")
+        else:
+            lines = ["📅 *This Week:*\n"]
+            for e in events:
+                lines.append(f"• {e['datetime']} — {e['title']}")
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    elif intent == "gcal_add":
+        from modules.gcal import is_connected, add_event
+        import pytz as _pytz
+        if not is_connected():
+            await update.message.reply_text("Google Calendar not connected. Say 'connect google calendar' first.")
+            return
+        title = intent_data.get("action") or text
+        time_str = intent_data.get("time") or "09:00"
+        h, m = map(int, time_str.split(":"))
+        _tz = _pytz.timezone("Asia/Kuala_Lumpur")
+        start = datetime.now(_tz).replace(hour=h, minute=m, second=0, microsecond=0)
+        if add_event(title, start):
+            await update.message.reply_text(f"✅ Added to calendar: *{title}* at {time_str}", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ Failed to add event. Check calendar connection.")
+
+    # ── PLAN / BRIEFING ────────────────────────────────────────────────────────
+    elif intent == "morning_briefing":
+        await update.message.chat.send_action("typing")
+        from modules.morning_briefing import send_morning_briefing
+        await send_morning_briefing(context.bot)
+
+    elif intent == "plan_today":
+        from modules.goals import get_goals_summary
+        from modules.episodic_memory import get_episodic_context
+        from modules.gcal import is_connected, get_today_events
+        user_id = str(update.effective_user.id)
+        await update.message.chat.send_action("typing")
+        tasks_text = "\n".join(f"- {t['text']}" for t in task_list() if not t.get("done"))[:400] or "None"
+        goals_text = get_goals_summary()
+        episodic = get_episodic_context()
+        cal_text = ""
+        if is_connected():
+            events = get_today_events()
+            if events:
+                cal_text = "Calendar today:\n" + "\n".join(f"- {e['time']} {e['title']}" for e in events)
+        import pytz as _pytz
+        now_str = datetime.now(_pytz.timezone("Asia/Kuala_Lumpur")).strftime("%A, %d %b %Y %H:%M")
+        plan_prompt = (
+            f"Date/time: {now_str}\n\n"
+            f"Pending tasks:\n{tasks_text}\n\n"
+            f"{goals_text}\n\n{cal_text}\n\n{episodic}\n\n"
+            "Create a practical daily plan for Joe. Include:\n"
+            "1. Suggested time blocks based on his tasks and goals\n"
+            "2. What to focus on first and why\n"
+            "3. Any goal streaks at risk today\n"
+            "Be specific and actionable. Max 200 words."
+        )
+        plan = ask_claude_with_history(
+            build_owner_system_prompt(user_id, text),
+            plan_prompt, user_id, model=MODEL_SMART
+        )
+        await update.message.reply_text(plan)
+
+    elif intent == "episodic_memory":
+        from modules.episodic_memory import get_full_memory
+        memory_text = get_full_memory()
+        await update.message.reply_text(memory_text)
+
     else:
         user_id = str(update.effective_user.id)
         text_for_context = text  # includes quoted context for Claude
@@ -2143,11 +2518,32 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "current", "now", "latest", "score",
             "rate", "stock", "crypto", "btc",
             "eth", "live", "right now",
+            "rain", "raining", "forecast", "temperature",
+            "humid", "wind", "storm", "flood", "haze",
+            "when will", "how long", "until when",
+        ]
+        location_keywords = [
+            "nearby", "near me", "around me", "close to me",
+            "restaurant", "food", "eat", "cafe", "coffee",
+            "pharmacy", "hospital", "clinic", "atm", "bank",
+            "shop", "mall", "supermarket", "petrol", "station",
+            "open now", "what's around", "places near",
         ]
         needs_search = any(
             w in text_for_context.lower()
             for w in realtime_keywords
-        )
+        ) or bool(intent_data.get("city"))
+
+        # Inject saved GPS coordinates into query for location-based requests
+        saved_lat = memory_get("location_lat")
+        saved_lon = memory_get("location_lon")
+        has_location_query = any(w in text_for_context.lower() for w in location_keywords)
+        if has_location_query and saved_lat and saved_lon:
+            needs_search = True
+            text_for_context = (
+                f"{text_for_context} "
+                f"[My location: {saved_lat}, {saved_lon}]"
+            )
 
         if needs_search:
             reply = ask_claude_with_search(
@@ -2184,6 +2580,29 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             sent_msg = await update.message.reply_text(reply)
             track_bot_message(chat_id, sent_msg.message_id)
 
+        # ── PROACTIVE SUGGESTION (every 8 conversational messages) ───────────
+        try:
+            from modules.learner import increment_msg_counter, should_suggest, generate_proactive_suggestion, log_learning
+            log_learning(original_text[:300], "conversation")
+            if should_suggest():
+                _sugg = generate_proactive_suggestion(user_id, original_text)
+                if _sugg:
+                    await asyncio.sleep(0.8)
+                    await update.effective_chat.send_message(_sugg)
+        except Exception as _suge:
+            logger.error(f"[Learner] Proactive suggestion error: {_suge}")
+
+        # ── WEB LEARNING CHECK (background, only for web-search replies) ─────
+        if needs_search:
+            try:
+                from modules.learner import check_and_prompt_web_learning
+                asyncio.create_task(
+                    check_and_prompt_web_learning(context.bot, chat_id, reply, original_text)
+                )
+            except Exception as _wle:
+                logger.error(f"[Learner] Web learning task error: {_wle}")
+        # ─────────────────────────────────────────────────────────────────────
+
 async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return
     tasks = task_list()
@@ -2201,9 +2620,11 @@ async def cmd_schedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not jobs:
         await update.message.reply_text("📅 No schedules yet.\n\nTry: _schedule daily 7am weather_", parse_mode=None)
         return
-    lines = ["📅 *Active Schedules:*\n"]
+    lines = ["📅 *Schedules:*\n"]
     for jid, j in jobs.items():
-        lines.append(f"• *{j['time']}* ({j['frequency']}) — {j['label']}\n  ID: `{jid}`")
+        status = "🟡" if j.get("paused") else "▶️ "
+        lines.append(f"• {status}*{j['time']}* ({j['frequency']}) — {j['label']}\n  ID: `{jid}`")
+    lines.append("\nSay 'pause <id>' or 'resume <id>' to control.")
     await update.message.reply_text("\n".join(lines), parse_mode=None)
 
 async def cmd_memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
