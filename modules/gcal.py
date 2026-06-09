@@ -45,8 +45,13 @@ def _get_service():
     return build("calendar", "v3", credentials=creds)
 
 
+FLOW_STATE_FILE = "data/gcal_flow_state.json"
+_active_flow = None  # keep flow in memory to preserve code_verifier
+
+
 def get_auth_url() -> str | None:
     """Returns the OAuth2 URL for the user to visit. Returns None if credentials file missing."""
+    global _active_flow
     if not is_available():
         return None
     if not Path(CREDENTIALS_FILE).exists():
@@ -58,9 +63,7 @@ def get_auth_url() -> str | None:
             redirect_uri="urn:ietf:wg:oauth:2.0:oob"
         )
         auth_url, _ = flow.authorization_url(prompt="consent")
-        # Save flow state for completing auth
-        with open("data/gcal_flow_state.json", "w") as f:
-            json.dump({"client_secrets": CREDENTIALS_FILE}, f)
+        _active_flow = flow  # preserve so code_verifier survives until complete_auth
         return auth_url
     except Exception as e:
         logger.error(f"[GCal] Auth URL error: {e}")
@@ -69,17 +72,25 @@ def get_auth_url() -> str | None:
 
 def complete_auth(code: str) -> bool:
     """Exchange the auth code for a token and save it."""
+    global _active_flow
     if not Path(CREDENTIALS_FILE).exists():
         return False
     try:
         from google_auth_oauthlib.flow import Flow
-        flow = Flow.from_client_secrets_file(
-            CREDENTIALS_FILE, scopes=SCOPES,
-            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
-        )
+
+        # Use the in-memory flow (preserves code_verifier for PKCE)
+        flow = _active_flow
+        if flow is None:
+            # Fallback: recreate without PKCE (works if auth URL was also generated without it)
+            flow = Flow.from_client_secrets_file(
+                CREDENTIALS_FILE, scopes=SCOPES,
+                redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+            )
+
         flow.fetch_token(code=code)
         with open(TOKEN_FILE, "w") as f:
             f.write(flow.credentials.to_json())
+        _active_flow = None
         logger.info("[GCal] Auth completed, token saved")
         return True
     except Exception as e:
@@ -151,7 +162,7 @@ def add_event(title: str, start_dt: datetime, end_dt: datetime = None, descripti
     try:
         if not end_dt:
             end_dt = start_dt + timedelta(hours=1)
-        tz = "Asia/Kuala_Lumpur"
+        tz = "Asia/Macau"
         event = {
             "summary": title,
             "description": description,

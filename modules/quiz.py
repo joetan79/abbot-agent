@@ -221,8 +221,9 @@ def generate_python_coding(recent_topics=None):
 
 def _parse_multi_answers(text):
     """Parse multi-question answers like '2 C; 3 C' or 'Q2: C, Q3: C'.
-    Returns {sent_index: answer_letter} dict, or empty dict if no matches."""
-    matches = re.findall(r'[Qq]?(\d+)\s*[:.)\s]\s*([ABCDabcd])', text)
+    Returns {sent_index: answer_letter} dict, or empty dict if no matches.
+    Requires the answer letter to be a standalone character (not embedded in a word)."""
+    matches = re.findall(r'[Qq]?(\d+)\s*[:.)]\s*([ABCDabcd])(?:\b|$)', text)
     return {int(n): l.upper() for n, l in matches} if matches else {}
 
 

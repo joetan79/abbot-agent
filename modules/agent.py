@@ -1496,6 +1496,24 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"[Learner] Approval intercept error: {_le}")
     # ─────────────────────────────────────────────────────────────────────────
 
+    # ── GOOGLE CALENDAR AUTH CODE INTERCEPT ──────────────────────────────────
+    # Detect raw Google OAuth codes (start with "4/0A" or contain "calendar code:")
+    _stripped = original_text.strip()
+    _is_gcal_code = (
+        re.match(r'^4/0A[A-Za-z0-9_\-]+$', _stripped) or
+        re.match(r'^calendar code:\s*(.+)$', _stripped, re.IGNORECASE)
+    )
+    if _is_gcal_code:
+        from modules.gcal import complete_auth
+        m = re.match(r'^calendar code:\s*(.+)$', _stripped, re.IGNORECASE)
+        code = m.group(1).strip() if m else _stripped
+        if complete_auth(code):
+            await update.message.reply_text("✅ Google Calendar connected! Say 'what's on my calendar today' to check.")
+        else:
+            await update.message.reply_text("❌ Auth failed — make sure you copied the full code and try 'connect google calendar' again.")
+        return
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Extract quoted/replied-to message and build context-aware text for Claude
     text = original_text
     if update.message.reply_to_message:
@@ -1556,6 +1574,11 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             update, context, activity_info)
         return
     # ──────────────────────────────────────────
+
+    # ── INTENT PARSE (early — used by quiz intercept below) ──────────────────
+    _early_intent_data = parse_intent(text)
+    _early_intent = _early_intent_data.get("intent", "chat")
+    # ─────────────────────────────────────────────────────────────────────────
 
     # Quiz answer intercept — handle pending responses, resend, and status queries
     _quiz_handled = False
@@ -1631,8 +1654,21 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         await update.message.reply_text(_emsg)
                 return
 
+        # Only intercept as quiz answer if intent is chat (not weather/task/etc.)
+        # AND the message actually looks like a quiz answer
+        _text_s = text.strip()
+        _looks_like_answer = (
+            # Single letter A/B/C/D (optionally followed by punctuation/space)
+            bool(re.match(r'^[A-Da-d][.),\s]?$', _text_s)) or
+            # Multi-answer pattern: "1A 2B" or "Q1:A, Q2:B"
+            bool(re.search(r'[Qq]?\d+\s*[:.)]\s*[A-Da-d]\b', _text_s)) or
+            # Quiz keywords
+            any(kw in _text_s.lower() for kw in ["show answer", "skip", "give up"])
+        )
         for _qtype, _qkey in [("ai", "ai_quiz"), ("python", "python_quiz")]:
-            if _quiz_state[_qkey]["pending"] or _wants_resend:
+            if (_quiz_state[_qkey]["pending"] or _wants_resend) and (
+                _early_intent == "chat" and (_looks_like_answer or _wants_resend)
+            ):
                 if await handle_quiz_response(context.bot, text, _qtype):
                     _quiz_handled = True
     except Exception as _qe:
@@ -1640,9 +1676,9 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if _quiz_handled:
         return
 
-    # Continue with intent parsing...
-    intent_data = parse_intent(text)
-    intent = intent_data.get("intent", "chat")
+    # Reuse the intent already parsed above
+    intent_data = _early_intent_data
+    intent = _early_intent
     logger.info(f"DEBUG intent: {intent} | data: {intent_data}")
 
     # Override: if user is asking a question about schedules, use summary
@@ -2382,8 +2418,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         await update.message.reply_text(
             f"🔗 Visit this URL to authorize:\n\n{auth_url}\n\n"
-            "After authorizing, paste the code back with:\n`calendar code: [paste code here]`",
-            parse_mode="Markdown"
+            "After approving, Google will show you a code — just paste it here directly."
         )
 
     elif intent == "gcal_auth_code":
@@ -2434,11 +2469,39 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         title = intent_data.get("action") or text
         time_str = intent_data.get("time") or "09:00"
+        day_str = (intent_data.get("day") or "").strip().lower()
+        fire_date = (intent_data.get("fire_date") or "").strip()
+
+        _tz = _pytz.timezone("Asia/Macau")
+        now = datetime.now(_tz)
         h, m = map(int, time_str.split(":"))
-        _tz = _pytz.timezone("Asia/Kuala_Lumpur")
-        start = datetime.now(_tz).replace(hour=h, minute=m, second=0, microsecond=0)
+
+        # Resolve the target date
+        if fire_date:
+            # Explicit date like "2026-06-15"
+            try:
+                from datetime import date as _date
+                _d = datetime.strptime(fire_date, "%Y-%m-%d").date()
+                start = _tz.localize(datetime(_d.year, _d.month, _d.day, h, m, 0))
+            except Exception:
+                start = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        elif day_str in ("today", ""):
+            start = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        elif day_str == "tomorrow":
+            start = (now + timedelta(days=1)).replace(hour=h, minute=m, second=0, microsecond=0)
+        else:
+            # Named weekday: "Monday", "Friday", etc.
+            day_names = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
+            if day_str in day_names:
+                target_dow = day_names.index(day_str)
+                days_ahead = (target_dow - now.weekday()) % 7 or 7
+                start = (now + timedelta(days=days_ahead)).replace(hour=h, minute=m, second=0, microsecond=0)
+            else:
+                start = now.replace(hour=h, minute=m, second=0, microsecond=0)
+
+        date_label = start.strftime("%a %d %b")
         if add_event(title, start):
-            await update.message.reply_text(f"✅ Added to calendar: *{title}* at {time_str}", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ Added to calendar: *{title}*\n{date_label} at {time_str}", parse_mode="Markdown")
         else:
             await update.message.reply_text("❌ Failed to add event. Check calendar connection.")
 
