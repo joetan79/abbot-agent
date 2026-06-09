@@ -155,6 +155,13 @@ def get_week_events() -> list:
         return []
 
 
+TZ = "Asia/Macau"
+DAY_ABBR = {
+    "monday": "MO", "tuesday": "TU", "wednesday": "WE",
+    "thursday": "TH", "friday": "FR", "saturday": "SA", "sunday": "SU"
+}
+
+
 def add_event(title: str, start_dt: datetime, end_dt: datetime = None, description: str = "") -> bool:
     svc = _get_service()
     if not svc:
@@ -162,15 +169,154 @@ def add_event(title: str, start_dt: datetime, end_dt: datetime = None, descripti
     try:
         if not end_dt:
             end_dt = start_dt + timedelta(hours=1)
-        tz = "Asia/Macau"
         event = {
             "summary": title,
             "description": description,
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": tz},
-            "end": {"dateTime": end_dt.isoformat(), "timeZone": tz},
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": TZ},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": TZ},
         }
         svc.events().insert(calendarId="primary", body=event).execute()
         return True
     except Exception as e:
         logger.error(f"[GCal] add_event failed: {e}")
+        return False
+
+
+def add_recurring_event(
+    title: str,
+    start_date: "date",
+    end_date: "date",
+    days_of_week: list,
+    start_time: tuple,
+    end_time: tuple,
+    description: str = "",
+) -> int:
+    """Add recurring events on specified days between start_date and end_date.
+    start_time/end_time are (hour, minute) tuples.
+    Returns count of events created, or -1 on error."""
+    import pytz
+    from datetime import date as _date
+    svc = _get_service()
+    if not svc:
+        return -1
+    try:
+        tz = pytz.timezone(TZ)
+        day_names = [d.lower() for d in days_of_week]
+        day_nums = {"monday":0,"tuesday":1,"wednesday":2,"thursday":3,
+                    "friday":4,"saturday":5,"sunday":6}
+        target_days = [day_nums[d] for d in day_names if d in day_nums]
+
+        # Build RRULE: weekly on specified days until end_date
+        byday = ",".join(DAY_ABBR[d] for d in day_names if d in DAY_ABBR)
+        until_str = end_date.strftime("%Y%m%dT235959Z")
+        rrule = f"RRULE:FREQ=WEEKLY;BYDAY={byday};UNTIL={until_str}"
+
+        # Find first occurrence on or after start_date
+        cur = start_date
+        while cur.weekday() not in target_days:
+            cur = cur + timedelta(days=1)
+            if cur > end_date:
+                return 0
+
+        sh, sm = start_time
+        eh, em = end_time
+        start_dt = tz.localize(datetime(cur.year, cur.month, cur.day, sh, sm, 0))
+        end_dt = tz.localize(datetime(cur.year, cur.month, cur.day, eh, em, 0))
+
+        event = {
+            "summary": title,
+            "description": description,
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": TZ},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": TZ},
+            "recurrence": [rrule],
+        }
+        svc.events().insert(calendarId="primary", body=event).execute()
+        # Count occurrences for confirmation message
+        count = 0
+        cur2 = cur
+        while cur2 <= end_date:
+            if cur2.weekday() in target_days:
+                count += 1
+            cur2 = cur2 + timedelta(days=1)
+        return count
+    except Exception as e:
+        logger.error(f"[GCal] add_recurring_event failed: {e}")
+        return -1
+
+
+def find_events_by_title(title: str, days_ahead: int = 60) -> list:
+    """Search upcoming events whose title contains the given string (case-insensitive)."""
+    svc = _get_service()
+    if not svc:
+        return []
+    try:
+        now = datetime.utcnow()
+        result = svc.events().list(
+            calendarId="primary",
+            timeMin=now.isoformat() + "Z",
+            timeMax=(now + timedelta(days=days_ahead)).isoformat() + "Z",
+            singleEvents=True,
+            orderBy="startTime",
+            maxResults=50,
+        ).execute()
+        matches = []
+        title_lower = title.lower()
+        for e in result.get("items", []):
+            if title_lower in e.get("summary", "").lower():
+                matches.append({
+                    "id": e["id"],
+                    "title": e.get("summary", ""),
+                    "start": e["start"].get("dateTime", e["start"].get("date", "")),
+                    "end": e["end"].get("dateTime", e["end"].get("date", "")),
+                    "recurrence": e.get("recurrence", []),
+                    "recurringEventId": e.get("recurringEventId"),
+                })
+        return matches
+    except Exception as e:
+        logger.error(f"[GCal] find_events_by_title failed: {e}")
+        return []
+
+
+def modify_event(event_id: str, updates: dict, all_recurring: bool = False) -> bool:
+    """Patch an existing event. updates can have: title, start_time, end_time, start_date."""
+    import pytz
+    svc = _get_service()
+    if not svc:
+        return False
+    try:
+        event = svc.events().get(calendarId="primary", eventId=event_id).execute()
+        tz = pytz.timezone(TZ)
+
+        if "title" in updates:
+            event["summary"] = updates["title"]
+
+        if "start_time" in updates or "end_time" in updates or "start_date" in updates:
+            start_str = event["start"].get("dateTime", "")
+            end_str = event["end"].get("dateTime", "")
+            try:
+                start_dt = datetime.fromisoformat(start_str)
+                end_dt = datetime.fromisoformat(end_str)
+            except Exception:
+                return False
+
+            if "start_date" in updates:
+                d = updates["start_date"]
+                start_dt = start_dt.replace(year=d.year, month=d.month, day=d.day)
+                end_dt = end_dt.replace(year=d.year, month=d.month, day=d.day)
+
+            if "start_time" in updates:
+                h, m = updates["start_time"]
+                start_dt = start_dt.replace(hour=h, minute=m, second=0)
+
+            if "end_time" in updates:
+                h, m = updates["end_time"]
+                end_dt = end_dt.replace(hour=h, minute=m, second=0)
+
+            event["start"] = {"dateTime": start_dt.isoformat(), "timeZone": TZ}
+            event["end"] = {"dateTime": end_dt.isoformat(), "timeZone": TZ}
+
+        svc.events().update(calendarId="primary", eventId=event_id, body=event).execute()
+        return True
+    except Exception as e:
+        logger.error(f"[GCal] modify_event failed: {e}")
         return False

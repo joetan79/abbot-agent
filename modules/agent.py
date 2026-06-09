@@ -447,15 +447,29 @@ GOOGLE CALENDAR RULES:
   Examples: "what's on my calendar", "show calendar today", "any meetings today"
 - "gcal_week": user wants this week's events.
   Examples: "calendar this week", "what meetings do I have"
-- "gcal_add": user wants to add an event. Extract title into "action", time into "time", date if mentioned.
-  Examples: "add to calendar: dentist tomorrow 3pm"
+- "gcal_add": user wants to add a calendar event. Extract:
+    "action": event title (required)
+    "time": start time as "HH:MM" or null
+    "end_time": end time as "HH:MM" or null
+    "start_date": "YYYY-MM-DD" or "today"/"tomorrow"/weekday name or null
+    "end_date": "YYYY-MM-DD" for recurring range end or null
+    "recur_days": list of weekday names e.g. ["Wednesday","Friday"] or null
+  Examples: "add to calendar: dentist tomorrow 3pm", "add Arik class every Wed and Fri 9am-10:30am from 3 Jul to 16 Jul"
+- "gcal_modify": user wants to change/update/reschedule an existing calendar event. Extract:
+    "action": event title to search for (required)
+    "time": new start time "HH:MM" or null
+    "end_time": new end time "HH:MM" or null
+    "start_date": new date or null
+    "value": any other description of the change
 
 CALENDAR EXAMPLES:
 "connect google calendar" → {"intent":"gcal_connect"}
 "calendar code: 4/0Adeu5BxYz" → {"intent":"gcal_auth_code","value":"4/0Adeu5BxYz"}
 "what's on my calendar today" → {"intent":"gcal_today"}
 "calendar this week" → {"intent":"gcal_week"}
-"add to calendar dentist tomorrow 3pm" → {"intent":"gcal_add","action":"dentist","time":"15:00"}
+"add to calendar dentist tomorrow 3pm" → {"intent":"gcal_add","action":"dentist","time":"15:00","start_date":"tomorrow"}
+"add Arik scratch class every Wed and Fri 9am to 10:30am from 3 Jul to 16 Jul" → {"intent":"gcal_add","action":"Arik scratch class","time":"09:00","end_time":"10:30","start_date":"2026-07-03","end_date":"2026-07-16","recur_days":["Wednesday","Friday"]}
+"change dentist appointment to 4pm" → {"intent":"gcal_modify","action":"dentist","time":"16:00"}
 
 PLAN/BRIEFING RULES:
 - "plan_today": user wants a daily plan or focus suggestion.
@@ -505,7 +519,7 @@ QUIZ TOPIC EXAMPLES:
 
 Return JSON:
 {
-  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, plan_today, morning_briefing, episodic_memory, chat],
+  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, gcal_modify, plan_today, morning_briefing, episodic_memory, chat],
   "time": "HH:MM" or null,
   "frequency": "daily" or "weekly" or "once" or null,
   "day": day of week or null,
@@ -522,7 +536,11 @@ Return JSON:
   "fire_date": "today" or "tomorrow" or null,
   "delay_minutes": integer minutes for "in X minutes" reminders or null,
   "reminder_message": what to remind about or null,
-  "topics": quiz topics string for quiz_set_topics or null
+  "topics": quiz topics string for quiz_set_topics or null,
+  "end_time": "HH:MM" end time for calendar events or null,
+  "start_date": "YYYY-MM-DD" or "today"/"tomorrow"/weekday for calendar or null,
+  "end_date": "YYYY-MM-DD" end of recurring range or null,
+  "recur_days": list of weekday names for recurring events or null
 }
 Return ONLY the JSON object, no markdown, no explanation."""
     raw = ask_claude(system, text, max_tokens=300, model=MODEL_FAST)
@@ -2462,48 +2480,182 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     elif intent == "gcal_add":
-        from modules.gcal import is_connected, add_event
+        from modules.gcal import is_connected, add_event, add_recurring_event
         import pytz as _pytz
+        from datetime import date as _date
+
         if not is_connected():
             await update.message.reply_text("Google Calendar not connected. Say 'connect google calendar' first.")
             return
-        title = intent_data.get("action") or text
-        time_str = intent_data.get("time") or "09:00"
-        day_str = (intent_data.get("day") or "").strip().lower()
-        fire_date = (intent_data.get("fire_date") or "").strip()
+
+        title = (intent_data.get("action") or "").strip()
+        time_str = (intent_data.get("time") or "").strip()
+        end_time_str = (intent_data.get("end_time") or "").strip()
+        start_date_str = (intent_data.get("start_date") or intent_data.get("day") or "").strip().lower()
+        end_date_str = (intent_data.get("end_date") or "").strip()
+        recur_days = intent_data.get("recur_days") or []
+
+        # Clarify missing required fields
+        missing = []
+        if not title:
+            missing.append("event title")
+        if not time_str:
+            missing.append("start time")
+        if missing:
+            await update.message.reply_text(
+                f"Could you clarify the following for the calendar event?\n" +
+                "\n".join(f"• {m}" for m in missing)
+            )
+            return
 
         _tz = _pytz.timezone("Asia/Macau")
         now = datetime.now(_tz)
-        h, m = map(int, time_str.split(":"))
+        _dow_names = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
 
-        # Resolve the target date
-        if fire_date:
-            # Explicit date like "2026-06-15"
-            try:
-                from datetime import date as _date
-                _d = datetime.strptime(fire_date, "%Y-%m-%d").date()
-                start = _tz.localize(datetime(_d.year, _d.month, _d.day, h, m, 0))
-            except Exception:
-                start = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        elif day_str in ("today", ""):
-            start = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        elif day_str == "tomorrow":
-            start = (now + timedelta(days=1)).replace(hour=h, minute=m, second=0, microsecond=0)
-        else:
-            # Named weekday: "Monday", "Friday", etc.
-            day_names = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
-            if day_str in day_names:
-                target_dow = day_names.index(day_str)
-                days_ahead = (target_dow - now.weekday()) % 7 or 7
-                start = (now + timedelta(days=days_ahead)).replace(hour=h, minute=m, second=0, microsecond=0)
+        def _parse_date(s):
+            """Resolve a date string to a date object."""
+            if not s or s == "today":
+                return now.date()
+            if s == "tomorrow":
+                return (now + timedelta(days=1)).date()
+            if s in _dow_names:
+                days_ahead = (_dow_names.index(s) - now.weekday()) % 7 or 7
+                return (now + timedelta(days=days_ahead)).date()
+            for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+                try:
+                    return datetime.strptime(s, fmt).date()
+                except ValueError:
+                    pass
+            return now.date()
+
+        def _parse_hm(s):
+            parts = s.split(":")
+            return int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+
+        sh, sm = _parse_hm(time_str)
+        eh, em = _parse_hm(end_time_str) if end_time_str else (sh + 1, sm)
+        start_date = _parse_date(start_date_str)
+
+        # Recurring event
+        if recur_days and end_date_str:
+            end_date = _parse_date(end_date_str)
+            recur_days_clean = [d.strip().lower() for d in recur_days]
+            count = add_recurring_event(
+                title, start_date, end_date,
+                recur_days_clean, (sh, sm), (eh, em)
+            )
+            if count >= 0:
+                days_label = " & ".join(d.capitalize() for d in recur_days_clean)
+                await update.message.reply_text(
+                    f"✅ Added recurring event: *{title}*\n"
+                    f"Every {days_label}, {time_str}–{end_time_str or f'{eh:02d}:{em:02d}'}\n"
+                    f"{start_date.strftime('%d %b')} → {end_date.strftime('%d %b %Y')}\n"
+                    f"({count} occurrences)",
+                    parse_mode="Markdown"
+                )
             else:
-                start = now.replace(hour=h, minute=m, second=0, microsecond=0)
-
-        date_label = start.strftime("%a %d %b")
-        if add_event(title, start):
-            await update.message.reply_text(f"✅ Added to calendar: *{title}*\n{date_label} at {time_str}", parse_mode="Markdown")
+                await update.message.reply_text("❌ Failed to add recurring event. Check calendar connection.")
         else:
-            await update.message.reply_text("❌ Failed to add event. Check calendar connection.")
+            # Single event
+            start_dt = _pytz.timezone("Asia/Macau").localize(
+                datetime(start_date.year, start_date.month, start_date.day, sh, sm, 0)
+            )
+            end_dt = _pytz.timezone("Asia/Macau").localize(
+                datetime(start_date.year, start_date.month, start_date.day, eh, em, 0)
+            )
+            if add_event(title, start_dt, end_dt):
+                await update.message.reply_text(
+                    f"✅ Added to calendar: *{title}*\n"
+                    f"{start_date.strftime('%a %d %b')} {time_str}–{end_time_str or f'{eh:02d}:{em:02d}'}",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text("❌ Failed to add event. Check calendar connection.")
+
+    elif intent == "gcal_modify":
+        from modules.gcal import is_connected, find_events_by_title, modify_event
+        import pytz as _pytz
+        from datetime import date as _date
+
+        if not is_connected():
+            await update.message.reply_text("Google Calendar not connected. Say 'connect google calendar' first.")
+            return
+
+        search_title = (intent_data.get("action") or "").strip()
+        if not search_title:
+            await update.message.reply_text("Which event do you want to modify? Please include the event name.")
+            return
+
+        events = find_events_by_title(search_title)
+        if not events:
+            await update.message.reply_text(f"No upcoming events found matching '{search_title}'. Check the title and try again.")
+            return
+
+        # Build updates dict
+        updates = {}
+        new_time = (intent_data.get("time") or "").strip()
+        new_end_time = (intent_data.get("end_time") or "").strip()
+        new_date_str = (intent_data.get("start_date") or "").strip().lower()
+        new_title = (intent_data.get("value") or "").strip()
+
+        if new_time:
+            parts = new_time.split(":")
+            updates["start_time"] = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+        if new_end_time:
+            parts = new_end_time.split(":")
+            updates["end_time"] = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+        if new_date_str:
+            _dow = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
+            _tz = _pytz.timezone("Asia/Macau")
+            _now = datetime.now(_tz)
+            if new_date_str == "tomorrow":
+                updates["start_date"] = (_now + timedelta(days=1)).date()
+            elif new_date_str == "today":
+                updates["start_date"] = _now.date()
+            elif new_date_str in _dow:
+                days_ahead = (_dow.index(new_date_str) - _now.weekday()) % 7 or 7
+                updates["start_date"] = (_now + timedelta(days=days_ahead)).date()
+            else:
+                try:
+                    updates["start_date"] = datetime.strptime(new_date_str, "%Y-%m-%d").date()
+                except Exception:
+                    pass
+        if new_title:
+            updates["title"] = new_title
+
+        if not updates:
+            await update.message.reply_text("What would you like to change? (e.g. new time, new date, new title)")
+            return
+
+        # If multiple matches, show list and ask which one
+        if len(events) > 1:
+            lines = [f"Found {len(events)} matching events. Which one?"]
+            for i, e in enumerate(events[:5], 1):
+                try:
+                    dt = datetime.fromisoformat(e["start"].replace("Z", "+00:00"))
+                    label = dt.strftime("%a %d %b %H:%M")
+                except Exception:
+                    label = e["start"]
+                lines.append(f"{i}. {e['title']} — {label}")
+            await update.message.reply_text("\n".join(lines))
+            return
+
+        event = events[0]
+        if modify_event(event["id"], updates):
+            changes = []
+            if "start_time" in updates:
+                h, m = updates["start_time"]
+                changes.append(f"time → {h:02d}:{m:02d}")
+            if "start_date" in updates:
+                changes.append(f"date → {updates['start_date'].strftime('%a %d %b')}")
+            if "title" in updates:
+                changes.append(f"title → {updates['title']}")
+            await update.message.reply_text(
+                f"✅ Updated *{event['title']}*\n" + "\n".join(changes),
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("❌ Failed to update event.")
 
     # ── PLAN / BRIEFING ────────────────────────────────────────────────────────
     elif intent == "morning_briefing":
