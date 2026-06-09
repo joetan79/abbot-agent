@@ -168,14 +168,24 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         username = update.effective_user.username or ""
         user_id = str(update.effective_user.id)
-        from modules.study import _get_user_context
+        from modules.study import _get_user_context, load_skills
         from modules.group_context import get_context_str
         ctx = _get_user_context(username)
         prefs = get_preferences_prompt()
         thread = get_context_str(chat_id, exclude_sender=sender_name)
         thread_section = f"\n\n{thread}" if thread else ""
+
+        # Load study skills when message looks like homework/language help
+        _hw_keywords = [
+            "homework", "help me", "sentence", "重組", "造句", "chinese",
+            "math", "solve", "explain", "question", "answer", "what is",
+            "how to", "why", "calculate", "essay", "write", "translate",
+        ]
+        _looks_like_hw = any(kw in text.lower() for kw in _hw_keywords)
+        study_section = f"\n\n{load_skills(scope='study')}" if _looks_like_hw else ""
+
         system = (
-            f"{ctx}\n{prefs}{thread_section}\n\n"
+            f"{ctx}\n{prefs}{study_section}{thread_section}\n\n"
             "Be friendly and encouraging. "
             "Use the recent group conversation above (if any) to give context-aware replies."
         )
