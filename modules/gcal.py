@@ -148,7 +148,11 @@ def get_week_events() -> list:
                 date_str = dt.strftime("%a %d %b %H:%M")
             except Exception:
                 date_str = start_dt
-            events.append({"datetime": date_str, "title": e.get("summary", "(no title)")})
+            events.append({
+                "datetime": date_str,
+                "start_iso": start_dt,
+                "title": e.get("summary", "(no title)"),
+            })
         return events
     except Exception as e:
         logger.error(f"[GCal] get_week_events failed: {e}")

@@ -447,6 +447,10 @@ GOOGLE CALENDAR RULES:
   Examples: "what's on my calendar", "show calendar today", "any meetings today"
 - "gcal_week": user wants this week's events.
   Examples: "calendar this week", "what meetings do I have"
+- "gcal_remind": user wants reminders set for upcoming calendar events at a lead time.
+  Extract lead time into "hours" (e.g. "1 day before"→24, "half day"→12, "1 hour before"→1, "30 min"→0.5).
+  Extract optional scope into "action" ("this week", "today", "all upcoming" etc).
+  Examples: "remind me 1 hour before all this week's events", "set reminders 1 day before my calendar events"
 - "gcal_add": user wants to add a calendar event. Extract:
     "action": event title (required)
     "time": start time as "HH:MM" or null
@@ -519,7 +523,7 @@ QUIZ TOPIC EXAMPLES:
 
 Return JSON:
 {
-  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, gcal_modify, plan_today, morning_briefing, episodic_memory, chat],
+  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, gcal_modify, gcal_remind, plan_today, morning_briefing, episodic_memory, chat],
   "time": "HH:MM" or null,
   "frequency": "daily" or "weekly" or "once" or null,
   "day": day of week or null,
@@ -2656,6 +2660,110 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         else:
             await update.message.reply_text("❌ Failed to update event.")
+
+    elif intent == "gcal_remind":
+        from modules.gcal import is_connected, get_week_events, get_today_events
+        from modules.reminders import save_reminder
+        import pytz as _pytz
+
+        if not is_connected():
+            await update.message.reply_text("Google Calendar not connected. Say 'connect google calendar' first.")
+            return
+
+        # Parse lead time in hours
+        raw_hours = intent_data.get("hours")
+        try:
+            lead_hours = float(raw_hours) if raw_hours is not None else 1.0
+        except (TypeError, ValueError):
+            lead_hours = 1.0
+        lead_delta = timedelta(hours=lead_hours)
+
+        # Fetch events based on scope
+        scope = (intent_data.get("action") or "week").lower()
+        if "today" in scope:
+            events = get_today_events()
+            # get_today_events returns {time, title} — need datetime
+            _tz = _pytz.timezone("Asia/Macau")
+            _today = datetime.now(_tz).date()
+            rich_events = []
+            for e in events:
+                try:
+                    h, m = map(int, e["time"].split(":"))
+                    dt = _tz.localize(datetime(_today.year, _today.month, _today.day, h, m))
+                    rich_events.append({"title": e["title"], "start_dt": dt})
+                except Exception:
+                    pass
+        else:
+            raw_events = get_week_events()
+            rich_events = []
+            for e in raw_events:
+                try:
+                    dt = datetime.fromisoformat(e.get("start_iso") or e["datetime"])
+                    if dt.tzinfo is None:
+                        dt = _pytz.utc.localize(dt)
+                    rich_events.append({"title": e["title"], "start_dt": dt})
+                except Exception:
+                    pass
+
+        if not rich_events:
+            await update.message.reply_text("No upcoming calendar events found to set reminders for.")
+            return
+
+        scheduler = context.application.bot_data.get("scheduler")
+        chat_id = update.effective_chat.id
+        now_utc = datetime.now(timezone.utc)
+        set_count = 0
+        skipped = []
+
+        FALLBACK_HOURS = 1.0  # if requested lead time already passed, try 1hr before
+
+        for ev in rich_events:
+            fire_at = ev["start_dt"].astimezone(timezone.utc) - lead_delta
+            actual_lead_hours = lead_hours
+            if fire_at <= now_utc:
+                # Try fallback to 1 hour before
+                fallback_fire_at = ev["start_dt"].astimezone(timezone.utc) - timedelta(hours=FALLBACK_HOURS)
+                if fallback_fire_at <= now_utc:
+                    skipped.append(ev["title"])
+                    continue
+                fire_at = fallback_fire_at
+                actual_lead_hours = FALLBACK_HOURS
+            if actual_lead_hours >= 24:
+                lead_label = f"{int(actual_lead_hours // 24)} day(s)"
+            elif actual_lead_hours >= 1:
+                lead_label = f"{int(actual_lead_hours)} hour(s)"
+            else:
+                lead_label = f"{int(actual_lead_hours * 60)} min"
+            fallback_note = " ⚠️ (fallback — too close for 1 day)" if actual_lead_hours != lead_hours else ""
+            msg = f"⏰ Reminder: *{ev['title']}* starts in {lead_label}\n{ev['start_dt'].strftime('%a %d %b %H:%M')}"
+            rid = f"gcal_{ev['title'][:20].replace(' ','_')}_{int(fire_at.timestamp())}"
+            save_reminder(
+                reminder_id=rid,
+                chat_id=chat_id,
+                message=msg,
+                fire_at=fire_at,
+                reminder_type="gcal_event",
+                auto_delete=True,
+            )
+            if scheduler:
+                scheduler.add_job(
+                    fire_reminder,
+                    "date",
+                    run_date=fire_at,
+                    args=[context.bot, rid, chat_id, msg],
+                    id=rid,
+                    replace_existing=True,
+                )
+            set_count += 1
+            ev["_lead_label"] = lead_label + fallback_note
+
+        lines = [f"✅ Set {set_count} calendar reminder(s):"]
+        for ev in rich_events:
+            if "_lead_label" in ev:
+                lines.append(f"• {ev['title']} — {ev['start_dt'].strftime('%a %d %b %H:%M')} ({ev['_lead_label']} before)")
+        if skipped:
+            lines.append(f"\n⚠️ Skipped {len(skipped)} event(s) with no time left even for 1hr fallback.")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     # ── PLAN / BRIEFING ────────────────────────────────────────────────────────
     elif intent == "morning_briefing":
