@@ -37,9 +37,18 @@ def _get_service():
     if Path(TOKEN_FILE).exists():
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        with open(TOKEN_FILE, "w") as f:
-            f.write(creds.to_json())
+        try:
+            creds.refresh(Request())
+            with open(TOKEN_FILE, "w") as f:
+                f.write(creds.to_json())
+        except Exception as e:
+            logger.error(f"[GCal] Token refresh failed: {e}")
+            # Token revoked or expired — remove it so is_connected() returns False
+            try:
+                Path(TOKEN_FILE).unlink()
+            except Exception:
+                pass
+            return None
     if not creds or not creds.valid:
         return None
     return build("calendar", "v3", credentials=creds)

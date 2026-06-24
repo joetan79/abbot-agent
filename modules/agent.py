@@ -2457,7 +2457,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
     elif intent == "gcal_today":
         from modules.gcal import is_connected, get_today_events
         if not is_connected():
-            await update.message.reply_text("Google Calendar not connected. Say 'connect google calendar' to set it up.")
+            await update.message.reply_text("Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate.")
             return
         events = get_today_events()
         if not events:
@@ -2472,7 +2472,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
     elif intent == "gcal_week":
         from modules.gcal import is_connected, get_week_events
         if not is_connected():
-            await update.message.reply_text("Google Calendar not connected. Say 'connect google calendar' to set it up.")
+            await update.message.reply_text("Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate.")
             return
         events = get_week_events()
         if not events:
@@ -2489,7 +2489,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         from datetime import date as _date
 
         if not is_connected():
-            await update.message.reply_text("Google Calendar not connected. Say 'connect google calendar' first.")
+            await update.message.reply_text("Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate.")
             return
 
         title = (intent_data.get("action") or "").strip()
@@ -2582,7 +2582,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         from datetime import date as _date
 
         if not is_connected():
-            await update.message.reply_text("Google Calendar not connected. Say 'connect google calendar' first.")
+            await update.message.reply_text("Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate.")
             return
 
         search_title = (intent_data.get("action") or "").strip()
@@ -2667,7 +2667,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         import pytz as _pytz
 
         if not is_connected():
-            await update.message.reply_text("Google Calendar not connected. Say 'connect google calendar' first.")
+            await update.message.reply_text("Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate.")
             return
 
         # Parse lead time in hours
