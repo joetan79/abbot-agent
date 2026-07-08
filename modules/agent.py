@@ -1518,6 +1518,62 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"[Learner] Approval intercept error: {_le}")
     # ─────────────────────────────────────────────────────────────────────────
 
+    # ── PENDING GCAL MODIFY INTERCEPT ────────────────────────────────────────
+    _pending_gcal = context.user_data.get("pending_gcal_modify")
+    if _pending_gcal:
+        _tl = original_text.strip().lower()
+        _events = _pending_gcal["events"]
+        _updates = _pending_gcal["updates"]
+        _want_all = any(kw in _tl for kw in ["all", "all of them", "全部", "所有", "全都", "全"])
+        _selected = []
+        if _want_all:
+            _selected = _events
+        else:
+            # Try to parse a number
+            import re as _re
+            _nums = _re.findall(r'\d+', original_text)
+            if _nums:
+                for _n in _nums:
+                    _idx = int(_n) - 1
+                    if 0 <= _idx < len(_events):
+                        _selected.append(_events[_idx])
+        if _selected:
+            context.user_data.pop("pending_gcal_modify", None)
+            from modules.gcal import modify_event as _modify_event
+            _ok, _fail = 0, 0
+            for _ev in _selected:
+                if _modify_event(_ev["id"], _updates):
+                    _ok += 1
+                else:
+                    _fail += 1
+            _change_lines = []
+            if "start_time" in _updates:
+                h, m = _updates["start_time"]
+                _change_lines.append(f"time → {h:02d}:{m:02d}")
+            if "start_date" in _updates:
+                _change_lines.append(f"date → {_updates['start_date'].strftime('%a %d %b')}")
+            if "title" in _updates:
+                _change_lines.append(f"title → {_updates['title']}")
+            _summary = ", ".join(_change_lines) or "updated"
+            msg = f"✅ Updated {_ok} event(s): {_summary}"
+            if _fail:
+                msg += f"\n❌ {_fail} event(s) failed to update."
+            await update.message.reply_text(msg)
+            return
+        else:
+            # Unrecognised reply — keep state and re-prompt
+            _lines = [f"Please reply with a number (1–{len(_events)}) or 'all':"]
+            for _i, _e in enumerate(_events[:10], 1):
+                try:
+                    _dt = datetime.fromisoformat(_e["start"].replace("Z", "+00:00"))
+                    _label = _dt.strftime("%a %d %b %H:%M")
+                except Exception:
+                    _label = _e["start"]
+                _lines.append(f"{_i}. {_e['title']} — {_label}")
+            await update.message.reply_text("\n".join(_lines))
+            return
+    # ─────────────────────────────────────────────────────────────────────────
+
     # ── GOOGLE CALENDAR AUTH CODE INTERCEPT ──────────────────────────────────
     # Detect raw Google OAuth codes (start with "4/0A" or contain "calendar code:")
     _stripped = original_text.strip()
@@ -2633,8 +2689,12 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # If multiple matches, show list and ask which one
         if len(events) > 1:
-            lines = [f"Found {len(events)} matching events. Which one?"]
-            for i, e in enumerate(events[:5], 1):
+            context.user_data["pending_gcal_modify"] = {
+                "events": events,
+                "updates": updates,
+            }
+            lines = [f"Found {len(events)} matching events. Which one? (reply with a number, or 'all' to update all)"]
+            for i, e in enumerate(events[:10], 1):
                 try:
                     dt = datetime.fromisoformat(e["start"].replace("Z", "+00:00"))
                     label = dt.strftime("%a %d %b %H:%M")

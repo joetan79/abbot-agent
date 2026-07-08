@@ -304,13 +304,30 @@ def modify_event(event_id: str, updates: dict, all_recurring: bool = False) -> b
             event["summary"] = updates["title"]
 
         if "start_time" in updates or "end_time" in updates or "start_date" in updates:
-            start_str = event["start"].get("dateTime", "")
-            end_str = event["end"].get("dateTime", "")
-            try:
-                start_dt = datetime.fromisoformat(start_str)
-                end_dt = datetime.fromisoformat(end_str)
-            except Exception:
-                return False
+            start_str = event["start"].get("dateTime") or ""
+            end_str = event["end"].get("dateTime") or ""
+            is_all_day = not start_str
+            if is_all_day:
+                # All-day event: build datetime from date field
+                start_date_str = event["start"].get("date", "")
+                end_date_str = event["end"].get("date", "")
+                logger.info(f"[GCal] Event is all-day: start.date={start_date_str}")
+                try:
+                    from datetime import date as _date
+                    sd = datetime.strptime(start_date_str, "%Y-%m-%d")
+                    ed = datetime.strptime(end_date_str, "%Y-%m-%d") if end_date_str else sd
+                    start_dt = tz.localize(sd.replace(hour=0, minute=0, second=0))
+                    end_dt = tz.localize(ed.replace(hour=1, minute=0, second=0))
+                except Exception as parse_err:
+                    logger.error(f"[GCal] modify_event: failed to parse all-day date: {parse_err}")
+                    return False
+            else:
+                try:
+                    start_dt = datetime.fromisoformat(start_str)
+                    end_dt = datetime.fromisoformat(end_str)
+                except Exception as parse_err:
+                    logger.error(f"[GCal] modify_event: failed to parse dateTime '{start_str}': {parse_err}")
+                    return False
 
             if "start_date" in updates:
                 d = updates["start_date"]
@@ -324,6 +341,9 @@ def modify_event(event_id: str, updates: dict, all_recurring: bool = False) -> b
             if "end_time" in updates:
                 h, m = updates["end_time"]
                 end_dt = end_dt.replace(hour=h, minute=m, second=0)
+            elif is_all_day:
+                # Default end time = start + 1.5 hours when converting from all-day
+                end_dt = start_dt.replace(hour=start_dt.hour + 1, minute=30, second=0)
 
             event["start"] = {"dateTime": start_dt.isoformat(), "timeZone": TZ}
             event["end"] = {"dateTime": end_dt.isoformat(), "timeZone": TZ}
