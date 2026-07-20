@@ -138,6 +138,15 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             quoted_text = replied_msg.text
         elif replied_msg.caption:
             quoted_text = replied_msg.caption
+        logger.info(
+            f"DEBUG reply_to_message present | "
+            f"replied_from={replied_msg.from_user.username if replied_msg.from_user else None} | "
+            f"replied_text={quoted_text[:80]!r} | "
+            f"replied_has_text={replied_msg.text is not None} | "
+            f"replied_has_caption={replied_msg.caption is not None}"
+        )
+    else:
+        logger.info("DEBUG no reply_to_message on this update (not a reply)")
 
     # Build full context with quoted message
     if quoted_text:
@@ -799,6 +808,16 @@ async def main():
         args=[app.bot],
         id="health_weekly_analysis",
         replace_existing=True,
+    )
+    from modules.group_health import check_group_membership
+    scheduler.add_job(
+        check_group_membership,
+        "interval",
+        minutes=30,
+        args=[app.bot],
+        id="group_health_check",
+        replace_existing=True,
+        next_run_time=datetime.now(timezone.utc),
     )
     from modules.insights import send_daily_digest
     scheduler.add_job(
