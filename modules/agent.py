@@ -458,7 +458,12 @@ GOOGLE CALENDAR RULES:
     "start_date": "YYYY-MM-DD" or "today"/"tomorrow"/weekday name or null
     "end_date": "YYYY-MM-DD" for recurring range end or null
     "recur_days": list of weekday names e.g. ["Wednesday","Friday"] or null
+    "color": color name mentioned for the event (e.g. "green","red","blue","yellow") or null
   Examples: "add to calendar: dentist tomorrow 3pm", "add Arik class every Wed and Fri 9am-10:30am from 3 Jul to 16 Jul"
+  MULTIPLE EVENTS: if the user lists more than one event to add in the same message (e.g. two
+  different dates/times pasted together), return a JSON ARRAY of gcal_add objects instead of a
+  single object — one object per event. If a color was requested, repeat it on every object in
+  the array (it applies to all the events being added).
 - "gcal_modify": user wants to change/update/reschedule an existing calendar event. Extract:
     "action": event title to search for (required)
     "time": new start time "HH:MM" or null
@@ -474,6 +479,9 @@ CALENDAR EXAMPLES:
 "add to calendar dentist tomorrow 3pm" → {"intent":"gcal_add","action":"dentist","time":"15:00","start_date":"tomorrow"}
 "add Arik scratch class every Wed and Fri 9am to 10:30am from 3 Jul to 16 Jul" → {"intent":"gcal_add","action":"Arik scratch class","time":"09:00","end_time":"10:30","start_date":"2026-07-03","end_date":"2026-07-16","recur_days":["Wednesday","Friday"]}
 "change dentist appointment to 4pm" → {"intent":"gcal_modify","action":"dentist","time":"16:00"}
+"add below into my calendar, and color set to green\n5/9/2026 Sat 4:00PM-5:00PM TIS Front Field\n6/9/2026 Sun 9:30AM-10:30AM TIS Front Field" →
+[{"intent":"gcal_add","action":"TIS Front Field","time":"16:00","end_time":"17:00","start_date":"2026-09-05","color":"green"},
+ {"intent":"gcal_add","action":"TIS Front Field","time":"09:30","end_time":"10:30","start_date":"2026-09-06","color":"green"}]
 
 PLAN/BRIEFING RULES:
 - "plan_today": user wants a daily plan or focus suggestion.
@@ -544,14 +552,34 @@ Return JSON:
   "end_time": "HH:MM" end time for calendar events or null,
   "start_date": "YYYY-MM-DD" or "today"/"tomorrow"/weekday for calendar or null,
   "end_date": "YYYY-MM-DD" end of recurring range or null,
-  "recur_days": list of weekday names for recurring events or null
+  "recur_days": list of weekday names for recurring events or null,
+  "color": color name for calendar events (e.g. "green","red","blue") or null
 }
-Return ONLY the JSON object, no markdown, no explanation."""
-    raw = ask_claude(system, text, max_tokens=300, model=MODEL_FAST)
+Return ONLY the JSON object, no markdown, no explanation — EXCEPT for the multiple-events
+case described under MULTIPLE EVENTS above, where you return a JSON array of gcal_add objects
+instead of a single object. In that array case, include EVERY event mentioned in the message —
+never skip, merge, or summarize any of them, no matter how many there are."""
+    raw = ask_claude(system, text, max_tokens=4096, model=MODEL_FAST)
+
+    # The classifier is instructed to return one JSON object, except for the documented
+    # multi-calendar-event case where it returns a JSON array. Callers throughout agent.py
+    # assume a dict (they call .get() on the result directly) — normalize both shapes to a
+    # dict so a stray/unexpected array never crashes route_message with "'list' object has
+    # no attribute 'get'" (see bot.log 2026-09-03 22:10 for the original bug).
     try:
-        return json.loads(raw.strip().strip("```json").strip("```").strip())
+        parsed = json.loads(raw.strip().strip("```json").strip("```").strip())
     except Exception:
         return {"intent": "chat", "action": text}
+
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, list):
+        events = [e for e in parsed if isinstance(e, dict)]
+        if events and all(e.get("intent") == "gcal_add" for e in events):
+            return {"intent": "gcal_add_multi", "events": events}
+        if events:
+            return events[0]  # best-effort: act on the first item rather than crash
+    return {"intent": "chat", "action": text}
 
 def extract_time_period(action: str) -> str:
     match = re.search(r'last\s+(\d+)\s+hours?', action.lower())
@@ -1474,6 +1502,90 @@ async def fire_scheduled_deletion(bot, deletion_id: str):
     await delete_message_safe(bot, entry["chat_id"], entry["message_id"])
     remove_scheduled_deletion(deletion_id)
     logger.info(f"Scheduled deletion fired: {deletion_id} msg={entry['message_id']}")
+
+
+async def _gcal_add_from_intent(intent_data: dict) -> str:
+    """Adds one calendar event from a gcal_add-shaped intent dict and returns the
+    user-facing confirmation/error text. Shared by the single-event "gcal_add" intent
+    and the "gcal_add_multi" intent (one call per event in the list)."""
+    from modules.gcal import is_connected, add_event, add_recurring_event
+    import pytz as _pytz
+
+    if not is_connected():
+        return "Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate."
+
+    title = (intent_data.get("action") or "").strip()
+    time_str = (intent_data.get("time") or "").strip()
+    end_time_str = (intent_data.get("end_time") or "").strip()
+    start_date_str = (intent_data.get("start_date") or intent_data.get("day") or "").strip().lower()
+    end_date_str = (intent_data.get("end_date") or "").strip()
+    recur_days = intent_data.get("recur_days") or []
+    color = (intent_data.get("color") or "").strip()
+
+    # Clarify missing required fields
+    missing = []
+    if not title:
+        missing.append("event title")
+    if not time_str:
+        missing.append("start time")
+    if missing:
+        return "Could you clarify the following for the calendar event?\n" + "\n".join(f"• {m}" for m in missing)
+
+    _tz = _pytz.timezone("Asia/Macau")
+    now = datetime.now(_tz)
+    _dow_names = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
+
+    def _parse_date(s):
+        """Resolve a date string to a date object."""
+        if not s or s == "today":
+            return now.date()
+        if s == "tomorrow":
+            return (now + timedelta(days=1)).date()
+        if s in _dow_names:
+            days_ahead = (_dow_names.index(s) - now.weekday()) % 7 or 7
+            return (now + timedelta(days=days_ahead)).date()
+        for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(s, fmt).date()
+            except ValueError:
+                pass
+        return now.date()
+
+    def _parse_hm(s):
+        parts = s.split(":")
+        return int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+
+    sh, sm = _parse_hm(time_str)
+    eh, em = _parse_hm(end_time_str) if end_time_str else (sh + 1, sm)
+    start_date = _parse_date(start_date_str)
+
+    # Recurring event
+    if recur_days and end_date_str:
+        end_date = _parse_date(end_date_str)
+        recur_days_clean = [d.strip().lower() for d in recur_days]
+        count = add_recurring_event(
+            title, start_date, end_date,
+            recur_days_clean, (sh, sm), (eh, em), color=color,
+        )
+        if count >= 0:
+            days_label = " & ".join(d.capitalize() for d in recur_days_clean)
+            return (
+                f"✅ Added recurring event: *{title}*\n"
+                f"Every {days_label}, {time_str}–{end_time_str or f'{eh:02d}:{em:02d}'}\n"
+                f"{start_date.strftime('%d %b')} → {end_date.strftime('%d %b %Y')}\n"
+                f"({count} occurrences)"
+            )
+        return "❌ Failed to add recurring event. Check calendar connection."
+
+    # Single event
+    start_dt = _tz.localize(datetime(start_date.year, start_date.month, start_date.day, sh, sm, 0))
+    end_dt = _tz.localize(datetime(start_date.year, start_date.month, start_date.day, eh, em, 0))
+    if add_event(title, start_dt, end_dt, color=color):
+        return (
+            f"✅ Added to calendar: *{title}*\n"
+            f"{start_date.strftime('%a %d %b')} {time_str}–{end_time_str or f'{eh:02d}:{em:02d}'}"
+        )
+    return "❌ Failed to add event. Check calendar connection."
 
 
 async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2540,97 +2652,36 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     elif intent == "gcal_add":
-        from modules.gcal import is_connected, add_event, add_recurring_event
-        import pytz as _pytz
-        from datetime import date as _date
-
+        from modules.gcal import is_connected
         if not is_connected():
             await update.message.reply_text("Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate.")
             return
+        result_text = await _gcal_add_from_intent(intent_data)
+        await update.message.reply_text(result_text, parse_mode="Markdown")
 
-        title = (intent_data.get("action") or "").strip()
-        time_str = (intent_data.get("time") or "").strip()
-        end_time_str = (intent_data.get("end_time") or "").strip()
-        start_date_str = (intent_data.get("start_date") or intent_data.get("day") or "").strip().lower()
-        end_date_str = (intent_data.get("end_date") or "").strip()
-        recur_days = intent_data.get("recur_days") or []
-
-        # Clarify missing required fields
-        missing = []
-        if not title:
-            missing.append("event title")
-        if not time_str:
-            missing.append("start time")
-        if missing:
-            await update.message.reply_text(
-                f"Could you clarify the following for the calendar event?\n" +
-                "\n".join(f"• {m}" for m in missing)
-            )
+    elif intent == "gcal_add_multi":
+        from modules.gcal import is_connected
+        if not is_connected():
+            await update.message.reply_text("Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate.")
             return
+        events = intent_data.get("events") or []
+        if not events:
+            await update.message.reply_text("Couldn't find any events to add — please try again.")
+            return
+        results = [await _gcal_add_from_intent(ev) for ev in events]
 
-        _tz = _pytz.timezone("Asia/Macau")
-        now = datetime.now(_tz)
-        _dow_names = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
-
-        def _parse_date(s):
-            """Resolve a date string to a date object."""
-            if not s or s == "today":
-                return now.date()
-            if s == "tomorrow":
-                return (now + timedelta(days=1)).date()
-            if s in _dow_names:
-                days_ahead = (_dow_names.index(s) - now.weekday()) % 7 or 7
-                return (now + timedelta(days=days_ahead)).date()
-            for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
-                try:
-                    return datetime.strptime(s, fmt).date()
-                except ValueError:
-                    pass
-            return now.date()
-
-        def _parse_hm(s):
-            parts = s.split(":")
-            return int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
-
-        sh, sm = _parse_hm(time_str)
-        eh, em = _parse_hm(end_time_str) if end_time_str else (sh + 1, sm)
-        start_date = _parse_date(start_date_str)
-
-        # Recurring event
-        if recur_days and end_date_str:
-            end_date = _parse_date(end_date_str)
-            recur_days_clean = [d.strip().lower() for d in recur_days]
-            count = add_recurring_event(
-                title, start_date, end_date,
-                recur_days_clean, (sh, sm), (eh, em)
-            )
-            if count >= 0:
-                days_label = " & ".join(d.capitalize() for d in recur_days_clean)
-                await update.message.reply_text(
-                    f"✅ Added recurring event: *{title}*\n"
-                    f"Every {days_label}, {time_str}–{end_time_str or f'{eh:02d}:{em:02d}'}\n"
-                    f"{start_date.strftime('%d %b')} → {end_date.strftime('%d %b %Y')}\n"
-                    f"({count} occurrences)",
-                    parse_mode="Markdown"
-                )
-            else:
-                await update.message.reply_text("❌ Failed to add recurring event. Check calendar connection.")
-        else:
-            # Single event
-            start_dt = _pytz.timezone("Asia/Macau").localize(
-                datetime(start_date.year, start_date.month, start_date.day, sh, sm, 0)
-            )
-            end_dt = _pytz.timezone("Asia/Macau").localize(
-                datetime(start_date.year, start_date.month, start_date.day, eh, em, 0)
-            )
-            if add_event(title, start_dt, end_dt):
-                await update.message.reply_text(
-                    f"✅ Added to calendar: *{title}*\n"
-                    f"{start_date.strftime('%a %d %b')} {time_str}–{end_time_str or f'{eh:02d}:{em:02d}'}",
-                    parse_mode="Markdown"
-                )
-            else:
-                await update.message.reply_text("❌ Failed to add event. Check calendar connection.")
+        # Telegram caps a single message at 4096 chars — chunk the confirmations so a
+        # large batch (a dozen+ events) can't silently fail to send.
+        TELEGRAM_MSG_LIMIT = 3500
+        chunk, chunk_len = [], 0
+        for r in results:
+            if chunk and chunk_len + len(r) + 2 > TELEGRAM_MSG_LIMIT:
+                await update.message.reply_text("\n\n".join(chunk), parse_mode="Markdown")
+                chunk, chunk_len = [], 0
+            chunk.append(r)
+            chunk_len += len(r) + 2
+        if chunk:
+            await update.message.reply_text("\n\n".join(chunk), parse_mode="Markdown")
 
     elif intent == "gcal_modify":
         from modules.gcal import is_connected, find_events_by_title, modify_event

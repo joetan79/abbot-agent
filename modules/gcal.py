@@ -14,6 +14,27 @@ CREDENTIALS_FILE = os.getenv("GOOGLE_CALENDAR_CREDENTIALS", "data/gcal_credentia
 TOKEN_FILE = "data/gcal_token.json"
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
+# Google Calendar's fixed per-event color palette (colorId -> name), as shown in the
+# event color picker. "green" maps to Basil (10), the closer match to a plain "green"
+# ask; "sage" (2) is the paler alternate green some people mean instead.
+COLOR_NAME_TO_ID = {
+    "lavender": "1", "purple": "3", "grape": "3",
+    "sage": "2", "green": "10", "basil": "10",
+    "flamingo": "4", "pink": "4",
+    "banana": "5", "yellow": "5",
+    "tangerine": "6", "orange": "6",
+    "peacock": "7", "teal": "7", "cyan": "7",
+    "graphite": "8", "gray": "8", "grey": "8",
+    "blueberry": "9", "blue": "9",
+    "tomato": "11", "red": "11",
+}
+
+
+def _resolve_color_id(color: str | None) -> str | None:
+    if not color:
+        return None
+    return COLOR_NAME_TO_ID.get(color.strip().lower())
+
 
 def is_available() -> bool:
     try:
@@ -175,7 +196,7 @@ DAY_ABBR = {
 }
 
 
-def add_event(title: str, start_dt: datetime, end_dt: datetime = None, description: str = "") -> bool:
+def add_event(title: str, start_dt: datetime, end_dt: datetime = None, description: str = "", color: str = None) -> bool:
     svc = _get_service()
     if not svc:
         return False
@@ -188,6 +209,9 @@ def add_event(title: str, start_dt: datetime, end_dt: datetime = None, descripti
             "start": {"dateTime": start_dt.isoformat(), "timeZone": TZ},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": TZ},
         }
+        color_id = _resolve_color_id(color)
+        if color_id:
+            event["colorId"] = color_id
         svc.events().insert(calendarId="primary", body=event).execute()
         return True
     except Exception as e:
@@ -203,6 +227,7 @@ def add_recurring_event(
     start_time: tuple,
     end_time: tuple,
     description: str = "",
+    color: str = None,
 ) -> int:
     """Add recurring events on specified days between start_date and end_date.
     start_time/end_time are (hour, minute) tuples.
@@ -243,6 +268,9 @@ def add_recurring_event(
             "end": {"dateTime": end_dt.isoformat(), "timeZone": TZ},
             "recurrence": [rrule],
         }
+        color_id = _resolve_color_id(color)
+        if color_id:
+            event["colorId"] = color_id
         svc.events().insert(calendarId="primary", body=event).execute()
         # Count occurrences for confirmation message
         count = 0
