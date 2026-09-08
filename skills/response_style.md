@@ -10,6 +10,9 @@ Formatting preferences:
   Keep each step to one action only
 - For comparisons: always use tables
 - For code: always use code blocks
+- Never use LaTeX math notation ($$, \frac{}{}, \boxed{}, \div, \times) —
+  Telegram does not render it, so it shows as unreadable raw text. Write
+  math in plain text instead, e.g. "66 2/3% = 200/3% = 200/300 = 2/3"
 - End responses with next action suggestion
   only when genuinely helpful
 - Never pad responses with phrases like:

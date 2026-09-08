@@ -695,19 +695,21 @@ async def handle_photo(bot, photo, caption: str = "") -> str:
     """Download photo from Telegram and send to Claude for analysis."""
     try:
         import base64
+        from .skills_loader import load_skills
         # Get highest resolution photo
         file = await bot.get_file(photo[-1].file_id)
-        
+
         # Download image bytes
         import httpx
         async with httpx.AsyncClient() as client:
             response = await client.get(file.file_path)
             image_data = base64.standard_b64encode(response.content).decode("utf-8")
-        
+
         # Send to Claude with vision
         r = claude.messages.create(
             model=MODEL_SMART,
             max_tokens=1500,
+            system=load_skills(scope="study"),
             messages=[{
                 "role": "user",
                 "content": [
@@ -753,6 +755,7 @@ async def handle_photo_reanalysis(bot, file_id: str, user_question: str) -> str:
     try:
         import base64
         import httpx
+        from .skills_loader import load_skills
         file = await bot.get_file(file_id)
         async with httpx.AsyncClient() as client:
             response = await client.get(file.file_path)
@@ -765,6 +768,7 @@ async def handle_photo_reanalysis(bot, file_id: str, user_question: str) -> str:
         r = claude.messages.create(
             model=MODEL_SMART,
             max_tokens=1500,
+            system=load_skills(scope="study"),
             messages=[{
                 "role": "user",
                 "content": [
