@@ -497,6 +497,31 @@ PLAN EXAMPLES:
 "send morning briefing" → {"intent":"morning_briefing"}
 "what do you know about me" → {"intent":"episodic_memory"}
 
+GOUT / URIC ACID FOOD LOG RULES (Joe's private diet tracking — text-only meals;
+photo meals are handled separately by caption keyword, not through this classifier):
+- "food_log": user describes a meal in text (no photo) to log for gout/uric acid
+  tracking. Extract the meal description into "action".
+  Examples: "log dinner: beef noodles and a beer", "I had sardines and spinach for lunch",
+  "食咗蜆同啤酒" (only trigger this when the message is clearly describing food eaten,
+  not general chat about food)
+- "food_report": user wants to see their gout/uric acid weekly report/pattern now
+  (instead of waiting for the scheduled Monday report).
+  Examples: "show my uric acid report", "gout report this week", "how's my diet been"
+- "food_log_delete": user wants to remove/undo a food log entry (e.g. they logged
+  something by mistake, or hadn't actually eaten it yet). Extract any identifying
+  detail (food name) into "action" — leave "action" empty/null to mean "remove the
+  most recent entry."
+  Examples: "remove that food log", "I haven't eaten that yet, delete the record",
+  "undo the last food log", "delete the omelet entry"
+
+GOUT EXAMPLES:
+"log dinner: beef noodles and a beer" → {"intent":"food_log","action":"beef noodles and a beer"}
+"I had sardines and spinach for lunch" → {"intent":"food_log","action":"sardines and spinach for lunch"}
+"show my uric acid report" → {"intent":"food_report"}
+"gout report this week" → {"intent":"food_report"}
+"這我還沒有吃，可以移除記錄" → {"intent":"food_log_delete","action":null}
+"delete the omelet food log" → {"intent":"food_log_delete","action":"omelet"}
+
 SCHEDULE PAUSE/RESUME RULES:
 - Return "schedule_pause" when user wants to temporarily stop/pause/disable a schedule (without deleting it).
   Examples: "pause news schedule", "pause the 7am weather", "stop the crypto report for now", "disable AI pulse schedule"
@@ -531,7 +556,7 @@ QUIZ TOPIC EXAMPLES:
 
 Return JSON:
 {
-  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, gcal_modify, gcal_remind, plan_today, morning_briefing, episodic_memory, chat],
+  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, gcal_modify, gcal_remind, plan_today, morning_briefing, episodic_memory, food_log, food_report, food_log_delete, chat],
   "time": "HH:MM" or null,
   "frequency": "daily" or "weekly" or "once" or null,
   "day": day of week or null,
@@ -886,6 +911,11 @@ async def run_scheduled_job(bot, job_id: str, action: str):
     elif action in ("morning_briefing", "morning briefing", "briefing"):
         from modules.morning_briefing import send_morning_briefing
         await send_morning_briefing(bot)
+        return
+
+    elif action == "gout_weekly_report":
+        from modules.gout_tracker import send_weekly_report
+        await send_weekly_report(bot)
         return
 
     elif action == "daily_report":
@@ -2918,6 +2948,29 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         from modules.episodic_memory import get_full_memory
         memory_text = get_full_memory()
         await update.message.reply_text(memory_text)
+
+    elif intent == "food_log":
+        from modules.gout_tracker import analyze_meal_text
+        description = (intent_data.get("action") or "").strip()
+        if not description:
+            await update.message.reply_text("What did you eat? e.g. \"log dinner: beef noodles and a beer\"")
+        else:
+            await update.message.chat.send_action("typing")
+            reply = analyze_meal_text(description)
+            await update.message.reply_text(f"🩺 {reply}")
+
+    elif intent == "food_report":
+        from modules.gout_tracker import send_weekly_report
+        await update.message.chat.send_action("typing")
+        await send_weekly_report(context.bot)
+        if update.message.chat.type != "private":
+            await update.message.reply_text("🩺 Sent your uric acid report to our private chat.")
+
+    elif intent == "food_log_delete":
+        from modules.gout_tracker import remove_entry
+        hint = (intent_data.get("action") or "").strip()
+        result = remove_entry(hint)
+        await update.message.reply_text(f"🩺 {result}")
 
     else:
         user_id = str(update.effective_user.id)

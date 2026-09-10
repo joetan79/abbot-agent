@@ -14,6 +14,7 @@ from telegram.ext import (
 )
 from modules.utils import handle_photo, photo_cache_set
 from modules import gmail_monitor
+from modules import gout_tracker
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -464,6 +465,20 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # Remove bot mention from caption if present
     if context.bot.username:
         caption = caption.replace(f"@{context.bot.username}", "").strip()
+
+    # Gout/uric acid food diary — only the owner, and only when the caption
+    # marks it as food (keeps it separate from homework/general photos on
+    # this same handler). "ask"/"問" wins over the log keywords — e.g. "ask
+    # food"/"問餐" answers without saving to the diary. See modules/gout_tracker.py.
+    is_owner_sender = is_owner(update.effective_user.id if update.effective_user else 0)
+    if is_owner_sender and gout_tracker.is_food_query_caption(caption):
+        reply = await gout_tracker.query_meal_photo(context.bot, msg.photo, caption)
+        await msg.reply_text(f"🩺 {reply}")
+        return
+    if is_owner_sender and gout_tracker.is_food_log_caption(caption):
+        reply = await gout_tracker.analyze_meal_photo(context.bot, msg.photo, caption)
+        await msg.reply_text(f"🩺 {reply}")
+        return
 
     reply = await handle_photo(context.bot, msg.photo, caption)
     sent = await msg.reply_text(f"🖼 {reply}")

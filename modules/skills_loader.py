@@ -21,6 +21,7 @@ SKILL_PRIORITY = [
     "weather_reporting",     # domain specific
     "study_assistant",       # domain specific
     "xfeed_quality",         # xfeed source/format rules
+    "gout_diet",             # domain specific — Joe's uric acid/gout food tracking
 ]
 
 
@@ -67,6 +68,11 @@ def load_skills(scope: str = "all") -> str:
             "communication_style",
             "response_style",
             "xfeed_quality",
+        ],
+        "gout": [
+            "communication_style",
+            "response_style",
+            "gout_diet",
         ],
         "all": SKILL_PRIORITY,
     }
