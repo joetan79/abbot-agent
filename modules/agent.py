@@ -513,6 +513,25 @@ photo meals are handled separately by caption keyword, not through this classifi
   most recent entry."
   Examples: "remove that food log", "I haven't eaten that yet, delete the record",
   "undo the last food log", "delete the omelet entry"
+- "food_log_correct": user is CORRECTING/AMENDING the food they *just* logged —
+  not describing a new/different meal. Signal phrases: starts with "補充"
+  (addendum), "不是...，只是/而是..." (it's not X, it's actually Y), "其實"
+  (actually), "修正" (correction), "沒有..." said right after a log (e.g. "no
+  organs"), "actually it's just X". Extract the correction itself into "action".
+  Only use this right after a food_log/photo-log reply — never for an unrelated
+  new meal.
+  Examples: "補充：不是豬雜，只是燒肉", "actually it's just roast pork, no organ meat",
+  "no it wasn't beef, it was pork"
+- "food_log_status": user asks what's currently logged today/tonight (a plain
+  factual listing, NOT the weekly pattern report — that's food_report). ONLY use
+  this when the message EXPLICITLY says it's about food/meals/diet — e.g. contains
+  "food log", "飲食記錄", "餐記錄", "dinner log", "lunch log", "meal log", "尿酸記錄",
+  or clearly names a meal (breakfast/lunch/dinner/早餐/午餐/晚餐) together with "log"/"記錄".
+  A BARE "what's my log" / "show me the log" / "log係咩" with NO food/meal/diet
+  qualifier is AMBIGUOUS — there may be other kinds of logs (e.g. schedules, tasks)
+  — use "chat" instead so ABbot asks which log they mean, rather than assuming food.
+  Examples: "what's my food log today", "今日 food log 係咩", "show today's dinner log"
+  NOT this intent (too vague, use "chat"): "what's my log", "show me the log", "log係咩"
 
 GOUT EXAMPLES:
 "log dinner: beef noodles and a beer" → {"intent":"food_log","action":"beef noodles and a beer"}
@@ -521,6 +540,11 @@ GOUT EXAMPLES:
 "gout report this week" → {"intent":"food_report"}
 "這我還沒有吃，可以移除記錄" → {"intent":"food_log_delete","action":null}
 "delete the omelet food log" → {"intent":"food_log_delete","action":"omelet"}
+"補充：不是豬雜，只是燒肉" → {"intent":"food_log_correct","action":"不是豬雜，只是燒肉"}
+"是燒豬肉而已，沒有內臟" → {"intent":"food_log_correct","action":"是燒豬肉而已，沒有內臟"}
+"好，所以今晚的dinner log是？" → {"intent":"food_log_status"}
+"今日 food log 係咩" → {"intent":"food_log_status"}
+"what's my log" → {"intent":"chat","action":"user asked about \"my log\" with no food/meal qualifier — ask which log they mean (e.g. food log?)"}
 
 SCHEDULE PAUSE/RESUME RULES:
 - Return "schedule_pause" when user wants to temporarily stop/pause/disable a schedule (without deleting it).
@@ -556,7 +580,7 @@ QUIZ TOPIC EXAMPLES:
 
 Return JSON:
 {
-  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, gcal_modify, gcal_remind, plan_today, morning_briefing, episodic_memory, food_log, food_report, food_log_delete, chat],
+  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, gcal_modify, gcal_remind, plan_today, morning_briefing, episodic_memory, food_log, food_report, food_log_delete, food_log_correct, food_log_status, chat],
   "time": "HH:MM" or null,
   "frequency": "daily" or "weekly" or "once" or null,
   "day": day of week or null,
@@ -2953,7 +2977,10 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         from modules.gout_tracker import analyze_meal_text
         description = (intent_data.get("action") or "").strip()
         if not description:
-            await update.message.reply_text("What did you eat? e.g. \"log dinner: beef noodles and a beer\"")
+            await update.message.reply_text(
+                "你食咗咩呀？例如：「log dinner: beef noodles and a beer」\n"
+                "What did you eat? e.g. \"log dinner: beef noodles and a beer\""
+            )
         else:
             await update.message.chat.send_action("typing")
             reply = analyze_meal_text(description)
@@ -2964,13 +2991,45 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.chat.send_action("typing")
         await send_weekly_report(context.bot)
         if update.message.chat.type != "private":
-            await update.message.reply_text("🩺 Sent your uric acid report to our private chat.")
+            await update.message.reply_text("🩺 已將尿酸報告發送到我哋嘅私人對話。\nSent your uric acid report to our private chat.")
 
     elif intent == "food_log_delete":
         from modules.gout_tracker import remove_entry
         hint = (intent_data.get("action") or "").strip()
         result = remove_entry(hint)
         await update.message.reply_text(f"🩺 {result}")
+
+    elif intent == "food_log_correct":
+        from modules.gout_tracker import correct_last_entry
+        correction = (intent_data.get("action") or "").strip()
+        if not correction:
+            await update.message.reply_text("想更正最近嗰個記錄嘅咩？\nWhat should I correct about the last entry?")
+        else:
+            await update.message.chat.send_action("typing")
+            reply = correct_last_entry(correction)
+            await update.message.reply_text(f"🩺 {reply}")
+
+    elif intent == "food_log_status":
+        from modules.gout_tracker import get_today_summary
+        text = f"🩺 {get_today_summary()}"
+        # Full per-meal analysis (purine + secondary indicators) can add up
+        # across multiple meals in a day — chunk on paragraph boundaries so a
+        # long day's log doesn't silently fail to send past Telegram's 4096
+        # char cap. Same guard as gcal_add_multi's chunking.
+        TELEGRAM_MSG_LIMIT = 3500
+        if len(text) <= TELEGRAM_MSG_LIMIT:
+            await update.message.reply_text(text)
+        else:
+            parts = text.split("\n\n")
+            chunk, chunk_len = [], 0
+            for p in parts:
+                if chunk and chunk_len + len(p) + 2 > TELEGRAM_MSG_LIMIT:
+                    await update.message.reply_text("\n\n".join(chunk))
+                    chunk, chunk_len = [], 0
+                chunk.append(p)
+                chunk_len += len(p) + 2
+            if chunk:
+                await update.message.reply_text("\n\n".join(chunk))
 
     else:
         user_id = str(update.effective_user.id)
