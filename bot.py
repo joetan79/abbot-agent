@@ -26,7 +26,7 @@ from modules.utils import (
 from modules.study import cmd_ask, cmd_math, cmd_chinese, cmd_homework, USER_PROFILES
 from modules.agent import (
     handle_owner_message, run_scheduled_job,
-    cmd_tasks, cmd_schedules, cmd_memory, cmd_news, cmd_xfeed, cmd_report, cmd_skills,
+    cmd_tasks, cmd_schedules, cmd_myreports, cmd_memory, cmd_news, cmd_xfeed, cmd_report, cmd_skills,
     cmd_memories, cmd_forget,
     handle_delete_last, fire_scheduled_deletion,
     fire_escalation,
@@ -56,11 +56,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Commands:\n"
             "/tasks - Pending tasks\n"
             "/schedules - Active schedules\n"
+            "/myreports - Your configured recurring reports (weekly uric acid, etc.)\n"
             "/memory - Stored memory\n"
             "/memories - Memory by category\n"
             "/forget <key> - Delete a memory\n"
             "/news - Latest AI & Tech news\n"
-            "/report - Daily report\n"
+            "/report - One-off daily briefing (news+weather+tasks)\n"
             "/skills - Loaded skills\n"
             "/newsstatus - News tracking stats\n"
             "/clear - Clear chat history\n\n"
@@ -856,6 +857,7 @@ async def main():
     app.add_handler(CommandHandler("homework",  cmd_homework))
     app.add_handler(CommandHandler("tasks",     cmd_tasks))
     app.add_handler(CommandHandler("schedules", cmd_schedules))
+    app.add_handler(CommandHandler("myreports", cmd_myreports))
     app.add_handler(CommandHandler("memory",    cmd_memory))
     app.add_handler(CommandHandler("news",      cmd_news))
     app.add_handler(CommandHandler("xfeed",     cmd_xfeed))
@@ -880,10 +882,11 @@ async def main():
         BotCommand("start",          "Welcome & help"),
         BotCommand("tasks",          "View pending tasks"),
         BotCommand("schedules",      "View active schedules"),
+        BotCommand("myreports",      "View your configured recurring reports"),
         BotCommand("memory",         "View bot memory"),
         BotCommand("news",           "Top AI & Tech news"),
         BotCommand("xfeed",          "Fetch latest X / Twitter AI updates"),
-        BotCommand("report",         "Daily report now"),
+        BotCommand("report",         "One-off daily briefing now (not your configured reports — see /myreports)"),
         BotCommand("skills",         "View loaded AI skills"),
         BotCommand("newsstatus",     "News tracking stats"),
         BotCommand("feedhealth",     "Check RSS feed health"),

@@ -490,12 +490,26 @@ PLAN/BRIEFING RULES:
   Examples: "send morning briefing", "morning briefing now", "give me my briefing"
 - "episodic_memory": user asks what the bot knows/remembers about them.
   Examples: "what do you know about me", "show your memory of me", "what have you learned"
+- "report": user wants a one-off DAILY BRIEFING generated right now (news + weather +
+  tasks bundled together). This is NOT a list of configured recurring reports.
+  Examples: "give me a report", "daily report please", "what's my report today"
+- "report_list": user asks WHAT recurring reports they have configured (e.g. "do I
+  have a weekly report", "what reports am I getting", "list my scheduled reports") —
+  this is a factual listing, completely different from "report" above. Trigger this
+  whenever the word "report(s)" is paired with "my"/"scheduled"/"weekly"/"configured"/
+  "what do I have"/"list", or the Chinese equivalents (我嘅/已經定咗嘅/定期) — NOT when
+  they just want one generated now.
+  Examples: "what reports do I have", "show my scheduled reports", "do I have a weekly report",
+  "我有咩定期報告", "已經定咗邊啲report"
 
 PLAN EXAMPLES:
 "plan my day" → {"intent":"plan_today"}
 "what should I focus on today" → {"intent":"plan_today"}
 "send morning briefing" → {"intent":"morning_briefing"}
 "what do you know about me" → {"intent":"episodic_memory"}
+"give me a report" → {"intent":"report"}
+"what reports do I have" → {"intent":"report_list"}
+"do I have a weekly report" → {"intent":"report_list"}
 
 GOUT / URIC ACID FOOD LOG RULES (Joe's private diet tracking — text-only meals;
 photo meals are handled separately by caption keyword, not through this classifier):
@@ -580,7 +594,7 @@ QUIZ TOPIC EXAMPLES:
 
 Return JSON:
 {
-  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, gcal_modify, gcal_remind, plan_today, morning_briefing, episodic_memory, food_log, food_report, food_log_delete, food_log_correct, food_log_status, chat],
+  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, gcal_modify, gcal_remind, plan_today, morning_briefing, episodic_memory, report_list, food_log, food_report, food_log_delete, food_log_correct, food_log_status, chat],
   "time": "HH:MM" or null,
   "frequency": "daily" or "weekly" or "once" or null,
   "day": day of week or null,
@@ -1558,10 +1572,94 @@ async def fire_scheduled_deletion(bot, deletion_id: str):
     logger.info(f"Scheduled deletion fired: {deletion_id} msg={entry['message_id']}")
 
 
+async def _is_reply_related(prior_question: str, reply_text: str) -> bool:
+    """Cheap relatedness check for a pending clarification: does reply_text
+    look like an answer to prior_question, or is it an unrelated new message
+    (a topic change)? Used so a pending "what did you eat?"/"what should I
+    correct?" doesn't force-fit an unrelated next message. Defaults to True
+    on a parse failure — better to treat an ambiguous reply as an answer
+    (worst case: a slightly off food log entry, fixable via food_log_correct)
+    than to silently drop a real answer."""
+    system = (
+        f"The user was just asked: \"{prior_question}\"\n"
+        "Does their reply below answer that question, or is it clearly an "
+        "unrelated new request / topic change? Return ONLY JSON: "
+        '{"related": true} or {"related": false}.'
+    )
+    raw = ask_claude(system, reply_text, max_tokens=50, model=MODEL_FAST)
+    try:
+        result = json.loads(raw.strip().strip("```json").strip("```").strip())
+        return bool(result.get("related", True))
+    except Exception:
+        return True
+
+
+async def _resolve_gcal_add_clarification(partial_data: dict, reply_text: str):
+    """Interprets a reply to a pending "add calendar event" clarification
+    (e.g. "whole day" answering "what start time?"). Returns updated
+    intent_data merged with the new info, or None if the reply looks
+    unrelated to the pending question — e.g. the user changed topic instead
+    of answering — so the caller should clear the pending state and let the
+    message go through normal intent classification instead of forcing it
+    into the calendar flow.
+
+    This exists because a short/ambiguous reply like "whole day" carries no
+    signal on its own: parse_intent() classifies each message from scratch
+    with zero memory of what the bot just asked, so it either mis-guesses an
+    unrelated intent or (as happened here) falls back to general chat, which
+    then hallucinates an answer from unrelated conversation history. See
+    bot.log 2026-09-11 10:30 — "whole day" (meant to answer a calendar
+    start-time question) produced a fabricated food-log reply instead."""
+    system = (
+        "You are helping complete a partially-filled calendar event.\n"
+        f"So far: {json.dumps(partial_data, ensure_ascii=False)}\n\n"
+        "The user was just asked to clarify a missing field (e.g. start time). "
+        "Their reply below may answer that, OR it may be an unrelated new "
+        "request / topic change (in which case it should NOT be forced into "
+        "this calendar event).\n\n"
+        "If it answers the question with a specific time, return JSON with "
+        "ONLY the fields it provides plus \"related\":true, e.g.:\n"
+        '{"related":true,"time":"15:00"}\n'
+        "If they mean \"no specific time / whole day / all day\" (e.g. \"whole "
+        "day\", \"all day\", \"整天\", \"全日\", \"成日\"), return:\n"
+        '{"related":true,"all_day":true}\n'
+        "If the reply is clearly about something else and does NOT answer "
+        "this calendar question, return:\n"
+        '{"related":false}\n'
+        "Return ONLY the JSON object, no markdown, no explanation."
+    )
+    raw = ask_claude(system, reply_text, max_tokens=200, model=MODEL_FAST)
+    try:
+        result = json.loads(raw.strip().strip("```json").strip("```").strip())
+    except Exception:
+        return None
+    if not isinstance(result, dict) or not result.get("related"):
+        return None
+    merged = dict(partial_data)
+    for k, v in result.items():
+        if k != "related" and v is not None:
+            merged[k] = v
+    return merged
+
+
+def _gcal_missing_fields(intent_data: dict) -> list:
+    """Required fields still missing from a gcal_add-shaped intent dict.
+    all_day=True satisfies the "start time" requirement (no specific time
+    needed) — see _resolve_gcal_add_clarification for how "whole day"/"all
+    day" answers set that flag."""
+    missing = []
+    if not (intent_data.get("action") or "").strip():
+        missing.append("event title")
+    if not (intent_data.get("time") or "").strip() and not intent_data.get("all_day"):
+        missing.append("start time")
+    return missing
+
+
 async def _gcal_add_from_intent(intent_data: dict) -> str:
     """Adds one calendar event from a gcal_add-shaped intent dict and returns the
     user-facing confirmation/error text. Shared by the single-event "gcal_add" intent
-    and the "gcal_add_multi" intent (one call per event in the list)."""
+    and the "gcal_add_multi" intent (one call per event in the list). Caller must
+    have already checked _gcal_missing_fields(intent_data) is empty."""
     from modules.gcal import is_connected, add_event, add_recurring_event
     import pytz as _pytz
 
@@ -1575,15 +1673,7 @@ async def _gcal_add_from_intent(intent_data: dict) -> str:
     end_date_str = (intent_data.get("end_date") or "").strip()
     recur_days = intent_data.get("recur_days") or []
     color = (intent_data.get("color") or "").strip()
-
-    # Clarify missing required fields
-    missing = []
-    if not title:
-        missing.append("event title")
-    if not time_str:
-        missing.append("start time")
-    if missing:
-        return "Could you clarify the following for the calendar event?\n" + "\n".join(f"• {m}" for m in missing)
+    all_day = bool(intent_data.get("all_day"))
 
     _tz = _pytz.timezone("Asia/Macau")
     now = datetime.now(_tz)
@@ -1609,9 +1699,17 @@ async def _gcal_add_from_intent(intent_data: dict) -> str:
         parts = s.split(":")
         return int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
 
+    start_date = _parse_date(start_date_str)
+
+    if all_day:
+        # Recurring all-day events aren't supported — a rare combo, and the
+        # clarification flow that sets all_day only ever fills in a single event.
+        if add_event(title, all_day_date=start_date, color=color):
+            return f"✅ Added to calendar (all day): *{title}*\n{start_date.strftime('%a %d %b')}"
+        return "❌ Failed to add event. Check calendar connection."
+
     sh, sm = _parse_hm(time_str)
     eh, em = _parse_hm(end_time_str) if end_time_str else (sh + 1, sm)
-    start_date = _parse_date(start_date_str)
 
     # Recurring event
     if recur_days and end_date_str:
@@ -1640,6 +1738,248 @@ async def _gcal_add_from_intent(intent_data: dict) -> str:
             f"{start_date.strftime('%a %d %b')} {time_str}–{end_time_str or f'{eh:02d}:{em:02d}'}"
         )
     return "❌ Failed to add event. Check calendar connection."
+
+
+async def _gcal_modify_from_intent(intent_data: dict, context) -> dict:
+    """Modifies a calendar event from a gcal_modify-shaped intent dict.
+    Returns {"status": ..., "text": ...} — status is one of "not_connected",
+    "missing_title", "no_events", "missing_updates", "multi_match", "ok",
+    "failed". "missing_title"/"missing_updates" carry no "text" — the caller
+    (_handle_gcal_modify_result) owns those prompts so it can also set the
+    matching pending_gcal_modify_* state for the PENDING GCAL MODIFY
+    CLARIFICATION INTERCEPTs near the top of handle_owner_message.
+    "multi_match" sets context.user_data["pending_gcal_modify"] itself,
+    reusing the pre-existing disambiguation intercept."""
+    from modules.gcal import is_connected, find_events_by_title, modify_event
+    import pytz as _pytz
+
+    if not is_connected():
+        return {"status": "not_connected", "text": "Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate."}
+
+    search_title = (intent_data.get("action") or "").strip()
+    if not search_title:
+        return {"status": "missing_title"}
+
+    events = find_events_by_title(search_title)
+    if not events:
+        return {"status": "no_events", "text": f"No upcoming events found matching '{search_title}'. Check the title and try again."}
+
+    # Build updates dict
+    updates = {}
+    new_time = (intent_data.get("time") or "").strip()
+    new_end_time = (intent_data.get("end_time") or "").strip()
+    new_date_str = (intent_data.get("start_date") or "").strip().lower()
+    new_title = (intent_data.get("value") or "").strip()
+
+    if new_time:
+        parts = new_time.split(":")
+        updates["start_time"] = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    if new_end_time:
+        parts = new_end_time.split(":")
+        updates["end_time"] = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    if new_date_str:
+        _dow = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
+        _tz = _pytz.timezone("Asia/Macau")
+        _now = datetime.now(_tz)
+        if new_date_str == "tomorrow":
+            updates["start_date"] = (_now + timedelta(days=1)).date()
+        elif new_date_str == "today":
+            updates["start_date"] = _now.date()
+        elif new_date_str in _dow:
+            days_ahead = (_dow.index(new_date_str) - _now.weekday()) % 7 or 7
+            updates["start_date"] = (_now + timedelta(days=days_ahead)).date()
+        else:
+            try:
+                updates["start_date"] = datetime.strptime(new_date_str, "%Y-%m-%d").date()
+            except Exception:
+                pass
+    if new_title:
+        updates["title"] = new_title
+
+    if not updates:
+        return {"status": "missing_updates"}
+
+    # If multiple matches, show list and ask which one
+    if len(events) > 1:
+        context.user_data["pending_gcal_modify"] = {
+            "events": events,
+            "updates": updates,
+        }
+        lines = [f"Found {len(events)} matching events. Which one? (reply with a number, or 'all' to update all)"]
+        for i, e in enumerate(events[:10], 1):
+            try:
+                dt = datetime.fromisoformat(e["start"].replace("Z", "+00:00"))
+                label = dt.strftime("%a %d %b %H:%M")
+            except Exception:
+                label = e["start"]
+            lines.append(f"{i}. {e['title']} — {label}")
+        return {"status": "multi_match", "text": "\n".join(lines)}
+
+    event = events[0]
+    if modify_event(event["id"], updates):
+        changes = []
+        if "start_time" in updates:
+            h, m = updates["start_time"]
+            changes.append(f"time → {h:02d}:{m:02d}")
+        if "start_date" in updates:
+            changes.append(f"date → {updates['start_date'].strftime('%a %d %b')}")
+        if "title" in updates:
+            changes.append(f"title → {updates['title']}")
+        return {"status": "ok", "text": f"✅ Updated *{event['title']}*\n" + "\n".join(changes)}
+    return {"status": "failed", "text": "❌ Failed to update event."}
+
+
+async def _handle_gcal_modify_result(result: dict, update, context, fallback_intent_data: dict) -> None:
+    """Sends the right reply for a _gcal_modify_from_intent result, and — for
+    the two "missing X" statuses — remembers what we're waiting for via
+    context.user_data so the next message (however short) gets interpreted
+    as answering it instead of being reclassified from scratch. Same fix as
+    PENDING GCAL ADD INTERCEPT, applied to gcal_modify's two other
+    ask-then-blindly-reclassify spots."""
+    status = result["status"]
+    if status == "missing_title":
+        context.user_data["pending_gcal_modify_title"] = fallback_intent_data
+        await update.message.reply_text("Which event do you want to modify? Please include the event name.")
+    elif status == "missing_updates":
+        context.user_data["pending_gcal_modify_updates"] = fallback_intent_data
+        await update.message.reply_text("What would you like to change? (e.g. new time, new date, new title)")
+    elif status == "multi_match":
+        await update.message.reply_text(result["text"])
+    elif status == "ok":
+        await update.message.reply_text(result["text"], parse_mode="Markdown")
+    else:  # not_connected, no_events, failed
+        await update.message.reply_text(result["text"])
+
+
+async def _resolve_gcal_modify_update(reply_text: str):
+    """Interprets a reply to "what would you like to change?" (new time/date/
+    title for a calendar event). Returns extracted fields to merge in, or
+    None if the reply looks unrelated to the pending question."""
+    system = (
+        "The user was just asked what they'd like to change about a calendar "
+        "event (new time, new date, or new title). Their reply below may "
+        "answer that, or be an unrelated new request/topic change.\n\n"
+        "If it answers, return JSON with ONLY the fields it provides plus "
+        '"related":true — field names: "time" ("HH:MM"), "end_time" ("HH:MM"), '
+        '"start_date" ("YYYY-MM-DD" or "today"/"tomorrow"/weekday), "value" '
+        "(new title text). E.g.:\n"
+        '{"related":true,"time":"16:00"}\n'
+        '{"related":true,"start_date":"tomorrow"}\n'
+        '{"related":true,"value":"Dentist checkup"}\n'
+        "If the reply is clearly unrelated, return {\"related\":false}.\n"
+        "Return ONLY the JSON object, no markdown, no explanation."
+    )
+    raw = ask_claude(system, reply_text, max_tokens=150, model=MODEL_FAST)
+    try:
+        result = json.loads(raw.strip().strip("```json").strip("```").strip())
+    except Exception:
+        return None
+    if not isinstance(result, dict) or not result.get("related"):
+        return None
+    result.pop("related", None)
+    return result or None
+
+
+async def _reminder_add_from_intent(intent_data: dict, update, context) -> bool:
+    """Creates a reminder from a reminder_add-shaped intent dict, sending the
+    confirmation (or a parse-error message) itself. Returns True if the fire
+    time is still missing — the caller should ask and remember via
+    context.user_data["pending_reminder_time"] (see the PENDING REMINDER
+    TIME INTERCEPT) so a short follow-up like "10am" completes this reminder
+    instead of being reclassified from scratch. Returns False once handled
+    (created, or a time-parse error was already shown)."""
+    import pytz as _pytz
+    import uuid as _uuid
+    from modules.reminders import save_reminder as _save_reminder
+
+    _tz = _pytz.timezone('Asia/Kuala_Lumpur')
+    _now_local = datetime.now(_tz)
+    _chat_id = update.effective_chat.id
+    _reminder_msg_text = intent_data.get("reminder_message") or "Reminder"
+    _fire_time_str = intent_data.get("fire_time")   # "HH:MM" or null
+    _delay_minutes = intent_data.get("delay_minutes")  # int or null
+    _fire_date_hint = intent_data.get("fire_date")  # "today"/"tomorrow"/null
+
+    if _delay_minutes:
+        _fire_dt = _now_local + timedelta(minutes=int(_delay_minutes))
+    elif _fire_time_str:
+        try:
+            _h, _m = map(int, _fire_time_str.split(":"))
+        except Exception:
+            await update.message.reply_text("⚠️ Couldn't parse the time. Try: 'remind me at 10:00 to make coffee'")
+            return False
+        _fire_dt = _now_local.replace(hour=_h, minute=_m, second=0, microsecond=0)
+        if _fire_dt <= _now_local and _fire_date_hint != "today":
+            _fire_dt += timedelta(days=1)
+        elif _fire_date_hint == "tomorrow":
+            _fire_dt += timedelta(days=1)
+    else:
+        return True  # missing time — caller asks + remembers
+
+    _rid = f"rem_{_uuid.uuid4().hex[:8]}"
+    _fire_msg = f"⏰ Reminder: {_reminder_msg_text}"
+    _save_reminder(
+        reminder_id=_rid,
+        chat_id=_chat_id,
+        message=_fire_msg,
+        fire_at=_fire_dt,
+        reminder_type="general",
+        auto_delete=True,
+    )
+    _scheduler = context.application.bot_data.get("scheduler")
+    if _scheduler:
+        _scheduler.add_job(
+            fire_reminder,
+            "date",
+            run_date=_fire_dt,
+            args=[context.bot, _rid, _chat_id, _fire_msg],
+            id=_rid,
+            replace_existing=True,
+        )
+    _when_str = _fire_dt.strftime("%d %b %Y %H:%M")
+    _mins_from_now = int((_fire_dt - _now_local).total_seconds() / 60)
+    if _mins_from_now < 60:
+        _in_str = f"in {_mins_from_now} min"
+    elif _mins_from_now < 1440:
+        _in_str = f"in {_mins_from_now // 60}h {_mins_from_now % 60}m"
+    else:
+        _in_str = f"in {_mins_from_now // 1440}d {(_mins_from_now % 1440) // 60}h"
+    await update.message.reply_text(
+        f"⏰ Reminder set!\n\n"
+        f"📌 {_reminder_msg_text}\n"
+        f"🕐 {_when_str} ({_in_str})\n\n"
+        f"ID: {_rid}"
+    )
+    return False
+
+
+async def _resolve_reminder_time_clarification(reply_text: str):
+    """Interprets a reply to "when should I remind you?" (the reminder text
+    itself was already captured). Returns extracted fire_time/delay_minutes/
+    fire_date to merge in, or None if the reply looks unrelated."""
+    system = (
+        "The user was just asked when they want to be reminded (what to "
+        "remind them about was already captured separately). Their reply "
+        "below may answer that, or be an unrelated new request.\n\n"
+        "If it answers with a time, return JSON with \"related\":true plus "
+        'ONE of: "fire_time" (a specific clock time, "HH:MM" 24-hour) or '
+        '"delay_minutes" (integer minutes from now), and optionally '
+        '"fire_date" ("today" or "tomorrow"). E.g.:\n'
+        '{"related":true,"fire_time":"10:00"}\n'
+        '{"related":true,"delay_minutes":30}\n'
+        '{"related":true,"fire_time":"15:00","fire_date":"tomorrow"}\n'
+        "If the reply is clearly unrelated, return {\"related\":false}.\n"
+        "Return ONLY the JSON object, no markdown, no explanation."
+    )
+    raw = ask_claude(system, reply_text, max_tokens=150, model=MODEL_FAST)
+    try:
+        result = json.loads(raw.strip().strip("```json").strip("```").strip())
+    except Exception:
+        return None
+    if not isinstance(result, dict) or not result.get("related"):
+        return None
+    result.pop("related", None)
+    return result or None
 
 
 async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1738,6 +2078,111 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 _lines.append(f"{_i}. {_e['title']} — {_label}")
             await update.message.reply_text("\n".join(_lines))
             return
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── PENDING GCAL ADD INTERCEPT ───────────────────────────────────────────
+    # Set by the "gcal_add" dispatch below when a required field (title/time)
+    # is missing. Without this, the reply to "what start time?" (e.g. "whole
+    # day") got reclassified from scratch with zero memory of the question —
+    # see _resolve_gcal_add_clarification's docstring for the bug this fixes.
+    _pending_gcal_add = context.user_data.get("pending_gcal_add")
+    if _pending_gcal_add:
+        _resolved = await _resolve_gcal_add_clarification(_pending_gcal_add, original_text)
+        if _resolved is None:
+            # Not an answer to the pending question — drop it and let this
+            # message go through normal handling below instead of forcing it.
+            context.user_data.pop("pending_gcal_add", None)
+        else:
+            context.user_data.pop("pending_gcal_add", None)
+            _still_missing = _gcal_missing_fields(_resolved)
+            if _still_missing:
+                context.user_data["pending_gcal_add"] = _resolved
+                await update.message.reply_text(
+                    "Could you clarify the following for the calendar event?\n" +
+                    "\n".join(f"• {m}" for m in _still_missing)
+                )
+                return
+            from modules.gcal import is_connected as _gcal_is_connected
+            if not _gcal_is_connected():
+                await update.message.reply_text("Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate.")
+                return
+            _result_text = await _gcal_add_from_intent(_resolved)
+            await update.message.reply_text(_result_text, parse_mode="Markdown")
+            return
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── PENDING GCAL MODIFY CLARIFICATION INTERCEPTS ─────────────────────────
+    # Same fix as PENDING GCAL ADD above, for gcal_modify's two other
+    # ask-then-blindly-reclassify spots (the pre-existing "which of these N
+    # events?" disambiguation already has its own pending state — see
+    # PENDING GCAL MODIFY INTERCEPT further below, untouched).
+    _pending_modify_title = context.user_data.get("pending_gcal_modify_title")
+    if _pending_modify_title:
+        if await _is_reply_related("Which event do you want to modify?", original_text):
+            context.user_data.pop("pending_gcal_modify_title", None)
+            _merged = dict(_pending_modify_title)
+            _merged["action"] = original_text.strip()
+            _result = await _gcal_modify_from_intent(_merged, context)
+            await _handle_gcal_modify_result(_result, update, context, _merged)
+            return
+        context.user_data.pop("pending_gcal_modify_title", None)
+        # else: unrelated — fall through to normal handling below
+
+    _pending_modify_updates = context.user_data.get("pending_gcal_modify_updates")
+    if _pending_modify_updates:
+        _extracted = await _resolve_gcal_modify_update(original_text)
+        if _extracted is not None:
+            context.user_data.pop("pending_gcal_modify_updates", None)
+            _merged = dict(_pending_modify_updates)
+            _merged.update(_extracted)
+            _result = await _gcal_modify_from_intent(_merged, context)
+            await _handle_gcal_modify_result(_result, update, context, _merged)
+            return
+        context.user_data.pop("pending_gcal_modify_updates", None)
+        # else: unrelated — fall through to normal handling below
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── PENDING REMINDER TIME INTERCEPT ──────────────────────────────────────
+    _pending_reminder_time = context.user_data.get("pending_reminder_time")
+    if _pending_reminder_time:
+        _extracted = await _resolve_reminder_time_clarification(original_text)
+        if _extracted is not None:
+            context.user_data.pop("pending_reminder_time", None)
+            _merged = dict(_pending_reminder_time)
+            _merged.update(_extracted)
+            _still_needs = await _reminder_add_from_intent(_merged, update, context)
+            if _still_needs:
+                context.user_data["pending_reminder_time"] = _merged
+                await update.message.reply_text("⚠️ Still need a time — e.g. '10am' or 'in 30 minutes'")
+            return
+        context.user_data.pop("pending_reminder_time", None)
+        # else: unrelated — fall through to normal handling below
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── PENDING FOOD LOG / CORRECTION INTERCEPT ──────────────────────────────
+    # Same fix as PENDING GCAL ADD above, for the two other "ask then blindly
+    # reclassify" spots: food_log's "what did you eat?" and food_log_correct's
+    # "what should I correct?". No field-merging needed here — if related, the
+    # reply text itself IS the answer.
+    if context.user_data.get("pending_food_log"):
+        context.user_data.pop("pending_food_log", None)
+        if await _is_reply_related("What did you eat?", original_text):
+            from modules.gout_tracker import analyze_meal_text
+            await update.message.chat.send_action("typing")
+            _reply = analyze_meal_text(original_text)
+            await update.message.reply_text(f"🩺 {_reply}")
+            return
+        # else: unrelated — fall through to normal handling below
+
+    if context.user_data.get("pending_food_correct"):
+        context.user_data.pop("pending_food_correct", None)
+        if await _is_reply_related("What should I correct about the last food log entry?", original_text):
+            from modules.gout_tracker import correct_last_entry
+            await update.message.chat.send_action("typing")
+            _reply = correct_last_entry(original_text)
+            await update.message.reply_text(f"🩺 {_reply}")
+            return
+        # else: unrelated — fall through to normal handling below
     # ─────────────────────────────────────────────────────────────────────────
 
     # ── GOOGLE CALENDAR AUTH CODE INTERCEPT ──────────────────────────────────
@@ -2273,69 +2718,13 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             )
 
     elif intent == "reminder_add":
-        import pytz as _pytz
-        import uuid as _uuid
-        from modules.reminders import save_reminder as _save_reminder
-        _tz = _pytz.timezone('Asia/Kuala_Lumpur')
-        _now_local = datetime.now(_tz)
-        _chat_id = update.effective_chat.id
-        _reminder_msg_text = intent_data.get("reminder_message") or text
-        _fire_time_str = intent_data.get("fire_time")   # "HH:MM" or null
-        _delay_minutes = intent_data.get("delay_minutes")  # int or null
-        _fire_date_hint = intent_data.get("fire_date")  # "today"/"tomorrow"/null
-
-        if _delay_minutes:
-            _fire_dt = _now_local + timedelta(minutes=int(_delay_minutes))
-        elif _fire_time_str:
-            try:
-                _h, _m = map(int, _fire_time_str.split(":"))
-            except Exception:
-                await update.message.reply_text("⚠️ Couldn't parse the time. Try: 'remind me at 10:00 to make coffee'")
-                return
-            _fire_dt = _now_local.replace(hour=_h, minute=_m, second=0, microsecond=0)
-            # If time already passed today → push to tomorrow (unless hint says today)
-            if _fire_dt <= _now_local and _fire_date_hint != "today":
-                _fire_dt += timedelta(days=1)
-            elif _fire_date_hint == "tomorrow":
-                _fire_dt += timedelta(days=1)
-        else:
+        intent_data.setdefault("reminder_message", None)
+        if not intent_data["reminder_message"]:
+            intent_data["reminder_message"] = text
+        _needs_time = await _reminder_add_from_intent(intent_data, update, context)
+        if _needs_time:
+            context.user_data["pending_reminder_time"] = intent_data
             await update.message.reply_text("⚠️ Please tell me when. E.g. 'remind me at 10am to make coffee' or 'remind me in 30 minutes to call John'")
-            return
-
-        _rid = f"rem_{_uuid.uuid4().hex[:8]}"
-        _fire_msg = f"⏰ Reminder: {_reminder_msg_text}"
-        _saved = _save_reminder(
-            reminder_id=_rid,
-            chat_id=_chat_id,
-            message=_fire_msg,
-            fire_at=_fire_dt,
-            reminder_type="general",
-            auto_delete=True,
-        )
-        _scheduler = context.application.bot_data.get("scheduler")
-        if _scheduler:
-            _scheduler.add_job(
-                fire_reminder,
-                "date",
-                run_date=_fire_dt,
-                args=[context.bot, _rid, _chat_id, _fire_msg],
-                id=_rid,
-                replace_existing=True,
-            )
-        _when_str = _fire_dt.strftime("%d %b %Y %H:%M")
-        _mins_from_now = int((_fire_dt - _now_local).total_seconds() / 60)
-        if _mins_from_now < 60:
-            _in_str = f"in {_mins_from_now} min"
-        elif _mins_from_now < 1440:
-            _in_str = f"in {_mins_from_now // 60}h {_mins_from_now % 60}m"
-        else:
-            _in_str = f"in {_mins_from_now // 1440}d {(_mins_from_now % 1440) // 60}h"
-        await update.message.reply_text(
-            f"⏰ Reminder set!\n\n"
-            f"📌 {_reminder_msg_text}\n"
-            f"🕐 {_when_str} ({_in_str})\n\n"
-            f"ID: {_rid}"
-        )
 
     elif intent == "reminder_list":
         from modules.reminders import get_all_reminders as _get_all_rem
@@ -2579,6 +2968,9 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.chat.send_action("typing")
         await run_scheduled_job(context.bot, "manual_report", "daily_report")
 
+    elif intent == "report_list":
+        await update.message.reply_text(format_my_reports())
+
     # ── GOALS ──────────────────────────────────────────────────────────────────
     elif intent == "goal_add":
         from modules.goals import add_goal
@@ -2710,6 +3102,18 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if not is_connected():
             await update.message.reply_text("Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate.")
             return
+        missing = _gcal_missing_fields(intent_data)
+        if missing:
+            # Remember what we're waiting for, keyed to THIS field, so the next
+            # message (even a short one like "whole day") gets interpreted as
+            # answering it instead of being reclassified from scratch — see
+            # the PENDING GCAL ADD INTERCEPT near the top of this function.
+            context.user_data["pending_gcal_add"] = intent_data
+            await update.message.reply_text(
+                "Could you clarify the following for the calendar event?\n" +
+                "\n".join(f"• {m}" for m in missing)
+            )
+            return
         result_text = await _gcal_add_from_intent(intent_data)
         await update.message.reply_text(result_text, parse_mode="Markdown")
 
@@ -2738,93 +3142,8 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("\n\n".join(chunk), parse_mode="Markdown")
 
     elif intent == "gcal_modify":
-        from modules.gcal import is_connected, find_events_by_title, modify_event
-        import pytz as _pytz
-        from datetime import date as _date
-
-        if not is_connected():
-            await update.message.reply_text("Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate.")
-            return
-
-        search_title = (intent_data.get("action") or "").strip()
-        if not search_title:
-            await update.message.reply_text("Which event do you want to modify? Please include the event name.")
-            return
-
-        events = find_events_by_title(search_title)
-        if not events:
-            await update.message.reply_text(f"No upcoming events found matching '{search_title}'. Check the title and try again.")
-            return
-
-        # Build updates dict
-        updates = {}
-        new_time = (intent_data.get("time") or "").strip()
-        new_end_time = (intent_data.get("end_time") or "").strip()
-        new_date_str = (intent_data.get("start_date") or "").strip().lower()
-        new_title = (intent_data.get("value") or "").strip()
-
-        if new_time:
-            parts = new_time.split(":")
-            updates["start_time"] = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
-        if new_end_time:
-            parts = new_end_time.split(":")
-            updates["end_time"] = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
-        if new_date_str:
-            _dow = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
-            _tz = _pytz.timezone("Asia/Macau")
-            _now = datetime.now(_tz)
-            if new_date_str == "tomorrow":
-                updates["start_date"] = (_now + timedelta(days=1)).date()
-            elif new_date_str == "today":
-                updates["start_date"] = _now.date()
-            elif new_date_str in _dow:
-                days_ahead = (_dow.index(new_date_str) - _now.weekday()) % 7 or 7
-                updates["start_date"] = (_now + timedelta(days=days_ahead)).date()
-            else:
-                try:
-                    updates["start_date"] = datetime.strptime(new_date_str, "%Y-%m-%d").date()
-                except Exception:
-                    pass
-        if new_title:
-            updates["title"] = new_title
-
-        if not updates:
-            await update.message.reply_text("What would you like to change? (e.g. new time, new date, new title)")
-            return
-
-        # If multiple matches, show list and ask which one
-        if len(events) > 1:
-            context.user_data["pending_gcal_modify"] = {
-                "events": events,
-                "updates": updates,
-            }
-            lines = [f"Found {len(events)} matching events. Which one? (reply with a number, or 'all' to update all)"]
-            for i, e in enumerate(events[:10], 1):
-                try:
-                    dt = datetime.fromisoformat(e["start"].replace("Z", "+00:00"))
-                    label = dt.strftime("%a %d %b %H:%M")
-                except Exception:
-                    label = e["start"]
-                lines.append(f"{i}. {e['title']} — {label}")
-            await update.message.reply_text("\n".join(lines))
-            return
-
-        event = events[0]
-        if modify_event(event["id"], updates):
-            changes = []
-            if "start_time" in updates:
-                h, m = updates["start_time"]
-                changes.append(f"time → {h:02d}:{m:02d}")
-            if "start_date" in updates:
-                changes.append(f"date → {updates['start_date'].strftime('%a %d %b')}")
-            if "title" in updates:
-                changes.append(f"title → {updates['title']}")
-            await update.message.reply_text(
-                f"✅ Updated *{event['title']}*\n" + "\n".join(changes),
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text("❌ Failed to update event.")
+        result = await _gcal_modify_from_intent(intent_data, context)
+        await _handle_gcal_modify_result(result, update, context, intent_data)
 
     elif intent == "gcal_remind":
         from modules.gcal import is_connected, get_week_events, get_today_events
@@ -2977,6 +3296,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         from modules.gout_tracker import analyze_meal_text
         description = (intent_data.get("action") or "").strip()
         if not description:
+            context.user_data["pending_food_log"] = True
             await update.message.reply_text(
                 "你食咗咩呀？例如：「log dinner: beef noodles and a beer」\n"
                 "What did you eat? e.g. \"log dinner: beef noodles and a beer\""
@@ -3003,6 +3323,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         from modules.gout_tracker import correct_last_entry
         correction = (intent_data.get("action") or "").strip()
         if not correction:
+            context.user_data["pending_food_correct"] = True
             await update.message.reply_text("想更正最近嗰個記錄嘅咩？\nWhat should I correct about the last entry?")
         else:
             await update.message.chat.send_action("typing")
@@ -3159,6 +3480,55 @@ async def cmd_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for t in tasks:
         lines.append(f"• {t['text']}\n  ID: `{t['id']}`")
     await update.message.reply_text("\n".join(lines), parse_mode=None)
+
+def is_report_action(action: str) -> bool:
+    """A schedule counts as a "report" (vs. a news/crypto/quiz push) when its
+    action name says so — e.g. "gout_weekly_report", "daily_report". Any
+    future recurring report should keep "report" in its action name so it
+    shows up here automatically, no registry to maintain."""
+    return "report" in (action or "").lower()
+
+
+def format_my_reports() -> str:
+    """Human list of just the configured recurring REPORTS (e.g. the weekly
+    uric acid report) — separate from /schedules, which dumps every schedule
+    (news/crypto/quiz included) as raw entries. Built because "/report" is a
+    different, unrelated feature (an on-demand one-off daily briefing) that
+    was getting confused for "show me my configured reports" — see chat
+    2026-09-11 for the mixup this was built to fix."""
+    jobs = schedule_load_all()
+    report_jobs = {jid: j for jid, j in jobs.items() if is_report_action(j.get("action", ""))}
+    if not report_jobs:
+        return (
+            "你暫時未有設定任何定期報告。\n"
+            "You don't have any recurring reports set up yet."
+        )
+    _day_zh = {
+        "monday": "星期一", "tuesday": "星期二", "wednesday": "星期三",
+        "thursday": "星期四", "friday": "星期五", "saturday": "星期六", "sunday": "星期日",
+    }
+    lines = ["📋 我嘅報告 | My Reports\n"]
+    for jid, j in sorted(report_jobs.items()):
+        status = "🟡 已暫停 | Paused" if j.get("paused") else "▶️ 運行中 | Active"
+        freq = j.get("frequency", "daily")
+        time_str = j.get("time", "")
+        day = (j.get("day") or "").lower()
+        if freq == "weekly" and day in _day_zh:
+            when = f"逢{_day_zh[day]} {time_str} | Every {day.capitalize()} {time_str}"
+        else:
+            when = f"每日 {time_str} | Daily {time_str}"
+        lines.append(f"{status}\n{j.get('label', j.get('action'))}\n{when}\nID: {jid}\n")
+    lines.append(
+        "其他日常推送(新聞/crypto/quiz)請睇 /schedules\n"
+        "Other recurring pushes (news/crypto/quiz) — see /schedules for the full list"
+    )
+    return "\n".join(lines)
+
+
+async def cmd_myreports(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id if update.effective_user else 0): return
+    await update.message.reply_text(format_my_reports())
+
 
 async def cmd_schedules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return

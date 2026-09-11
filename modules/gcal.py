@@ -196,19 +196,38 @@ DAY_ABBR = {
 }
 
 
-def add_event(title: str, start_dt: datetime, end_dt: datetime = None, description: str = "", color: str = None) -> bool:
+def add_event(
+    title: str,
+    start_dt: datetime = None,
+    end_dt: datetime = None,
+    description: str = "",
+    color: str = None,
+    all_day_date=None,
+) -> bool:
+    """Pass all_day_date (a date, not datetime) for a no-specific-time event
+    (e.g. Joe says "whole day"/"all day") — start_dt/end_dt are ignored then.
+    Google represents all-day events with date-only start/end and an
+    exclusive end date (end = start + 1 day), no timeZone field."""
     svc = _get_service()
     if not svc:
         return False
     try:
-        if not end_dt:
-            end_dt = start_dt + timedelta(hours=1)
-        event = {
-            "summary": title,
-            "description": description,
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": TZ},
-            "end": {"dateTime": end_dt.isoformat(), "timeZone": TZ},
-        }
+        if all_day_date:
+            event = {
+                "summary": title,
+                "description": description,
+                "start": {"date": all_day_date.isoformat()},
+                "end": {"date": (all_day_date + timedelta(days=1)).isoformat()},
+            }
+        else:
+            if not end_dt:
+                end_dt = start_dt + timedelta(hours=1)
+            event = {
+                "summary": title,
+                "description": description,
+                "start": {"dateTime": start_dt.isoformat(), "timeZone": TZ},
+                "end": {"dateTime": end_dt.isoformat(), "timeZone": TZ},
+            }
         color_id = _resolve_color_id(color)
         if color_id:
             event["colorId"] = color_id
