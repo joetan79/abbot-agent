@@ -16,7 +16,14 @@ LOG_FILE = Path("data/gout_log.json")
 # Caption keywords (case-insensitive substring match) that mark a photo as a
 # meal to log, distinguishing it from homework/general photos on the same
 # handler. Only checked for the owner — see bot.py handle_photo_message.
-FOOD_LOG_KEYWORDS = ["food", "meal", "log", "尿酸", "嘌呤", "餐"]
+# Includes plain meal-time words (lunch/dinner/etc.) since those are the most
+# natural thing to caption a food photo with — missing "lunch" here is what
+# let 6 real lunch photos fall through to the generic (non-food) handler on
+# 2026-09-11 13:37-13:41 with zero purine/calorie analysis or logging.
+FOOD_LOG_KEYWORDS = [
+    "food", "meal", "log", "lunch", "dinner", "breakfast", "brunch", "snack", "supper",
+    "尿酸", "嘌呤", "餐", "午餐", "晚餐", "早餐", "宵夜", "下午茶",
+]
 
 # "ask"/"問" wins over the log keywords above — e.g. "ask food" or "問餐" gets
 # analysed and answered but NOT saved to the diary. Checked first in
@@ -72,9 +79,10 @@ def _add_entry(source: str, description: str, analysis: str) -> None:
 
 def remove_entry(hint: str = "") -> str:
     """Deletes one logged meal and returns a confirmation/error message.
-    With a hint (e.g. a food name), removes the most recent entry whose
-    description or analysis matches it. With no hint, removes the single
-    most recent entry — the common case of "oops, undo that last log"."""
+    With a hint (e.g. a food name OR a time like "13:51"), removes the most
+    recent entry whose description, analysis, or timestamp matches it. With
+    no hint, removes the single most recent entry — the common case of
+    "oops, undo that last log"."""
     log = _load_log()
     if not log:
         return "你暫時未有任何食物記錄。\nYou don't have any food log entries right now."
@@ -85,7 +93,11 @@ def remove_entry(hint: str = "") -> str:
     if hint.strip():
         hint_lower = hint.strip().lower()
         for e in entries:
-            if hint_lower in e["description"].lower() or hint_lower in e["analysis"].lower():
+            if (
+                hint_lower in e["description"].lower()
+                or hint_lower in e["analysis"].lower()
+                or hint_lower in e["timestamp"].lower()
+            ):
                 target = e
                 break
         if not target:
@@ -206,58 +218,68 @@ def get_entries_since(days: int = 7) -> list:
     return entries
 
 
-async def _vision_analyze(bot, photo, caption: str, will_log: bool) -> str:
-    """Downloads a Telegram photo and asks Claude to assess its purine/gout
-    risk. `will_log` only changes the wording of the instruction sent to
-    Claude (logged vs. quick lookup) — it does NOT itself write to the diary;
-    callers decide whether to call _add_entry."""
+async def _vision_analyze_ids(bot, file_ids: list, caption: str, will_log: bool) -> str:
+    """Downloads one or more Telegram photos (by file_id) and asks Claude to
+    assess their purine/gout risk AS ONE MEAL. Pass multiple file_ids when
+    several photos are the same meal (e.g. Joe photographing each dish of one
+    lunch separately) — they go into ONE vision call so the log ends up as
+    one meal entry, not N duplicate/fragmented ones. `will_log` only changes
+    the wording of the instruction sent to Claude (logged vs. quick lookup) —
+    it does NOT itself write to the diary; callers decide whether to call
+    _add_entry."""
     from modules.utils import claude, MODEL_SMART
     from modules.skills_loader import load_skills
     import base64
     import httpx
 
-    file = await bot.get_file(photo[-1].file_id)
+    content = []
     async with httpx.AsyncClient() as client:
-        response = await client.get(file.file_path)
-        image_data = base64.standard_b64encode(response.content).decode("utf-8")
+        for fid in file_ids:
+            file = await bot.get_file(fid)
+            response = await client.get(file.file_path)
+            image_data = base64.standard_b64encode(response.content).decode("utf-8")
+            content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data},
+            })
 
     intent_line = (
         "This is a meal Joe is logging for gout/uric acid tracking."
         if will_log else
         "Joe is just asking about this food's purine/gout risk — a quick lookup, NOT being logged to his diary."
     )
+    multi_note = (
+        f" These {len(file_ids)} photos are all part of the SAME meal (e.g. separate "
+        "dishes on the table) — analyse and rate them together as ONE meal, not separately."
+        if len(file_ids) > 1 else ""
+    )
     prompt = (
         (f"Caption: {caption}\n\n" if caption else "") +
-        f"{intent_line} Identify the food and rate its purine load per the rules above."
+        f"{intent_line}{multi_note} Identify the food and rate its purine load per the rules above."
     )
+    content.append({"type": "text", "text": prompt})
 
     r = claude.messages.create(
         model=MODEL_SMART,
         max_tokens=900,
         system=load_skills(scope="gout"),
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": image_data,
-                    },
-                },
-                {"type": "text", "text": prompt},
-            ],
-        }],
+        messages=[{"role": "user", "content": content}],
     )
     return r.content[0].text
 
 
-async def analyze_meal_photo(bot, photo, caption: str = "") -> str:
-    """Downloads a Telegram photo, asks Claude to assess its purine/gout
-    risk, logs the result, and returns the reply text to send back to Joe."""
+async def analyze_meal_photo(bot, photos, caption: str = "") -> str:
+    """Downloads one or more Telegram photos of the SAME meal, asks Claude to
+    assess purine/gout risk across all of them together, logs ONE combined
+    entry, and returns the reply text to send back to Joe.
+
+    `photos` is a list of Telegram photo-size arrays — pass [msg.photo] for a
+    single photo, or one array per photo when several images are one meal
+    (e.g. Joe photographing each dish separately). Multiple images go into a
+    single vision call so the log ends up as one meal, not N fragmented ones."""
     try:
-        analysis = await _vision_analyze(bot, photo, caption, will_log=True)
+        file_ids = [p[-1].file_id for p in photos]
+        analysis = await _vision_analyze_ids(bot, file_ids, caption, will_log=True)
         _add_entry("photo", caption or "(photo)", analysis)
         return analysis
     except Exception as e:
@@ -265,11 +287,12 @@ async def analyze_meal_photo(bot, photo, caption: str = "") -> str:
         return "Sorry, I couldn't analyse that meal photo. Please try again."
 
 
-async def query_meal_photo(bot, photo, caption: str = "") -> str:
+async def query_meal_photo(bot, photos, caption: str = "") -> str:
     """Like analyze_meal_photo but does NOT save to the food diary — for the
     "ask food"/"問餐" quick-lookup trigger (see is_food_query_caption)."""
     try:
-        return await _vision_analyze(bot, photo, caption, will_log=False)
+        file_ids = [p[-1].file_id for p in photos]
+        return await _vision_analyze_ids(bot, file_ids, caption, will_log=False)
     except Exception as e:
         logger.error(f"[Gout] photo query failed: {e}")
         return "Sorry, I couldn't analyse that meal photo. Please try again."
@@ -308,7 +331,7 @@ async def send_weekly_report(bot) -> None:
         await bot.send_message(
             chat_id=OWNER_CHAT_ID,
             text=(
-                "🩺 每週飲食健康報告 | Weekly Diet & Health Report\n\n"
+                "🩺 每週飲食記錄報告 | Weekly Food Log Report\n\n"
                 "呢個星期未記錄過任何餐 — 影相 caption 打「food」/「meal」/「log」/"
                 "「尿酸」/「嘌呤」/「餐」（或者直接同我講食咗咩）就可以開始記錄。\n"
                 "No meals logged this week — caption a food photo with "
@@ -334,7 +357,7 @@ async def send_weekly_report(bot) -> None:
         max_tokens=1500,
         model=MODEL_SMART,
     )
-    await bot.send_message(chat_id=OWNER_CHAT_ID, text=f"🩺 每週飲食健康報告 | Weekly Diet & Health Report\n\n{report}")
+    await bot.send_message(chat_id=OWNER_CHAT_ID, text=f"🩺 每週飲食記錄報告 | Weekly Food Log Report\n\n{report}")
 
     # Clear exactly the entries this report covered — not a blanket wipe — so
     # any meal logged concurrently while the report was being generated survives.

@@ -3489,16 +3489,42 @@ def is_report_action(action: str) -> bool:
     return "report" in (action or "").lower()
 
 
+# Reports registered directly via scheduler.add_job(...) in bot.py's startup
+# — NOT in data/schedules.json, so format_my_reports() below can't discover
+# them by reading schedules like it does for dynamic ones. Missing these here
+# is exactly the gap that caused the Weekly Health & Learn Report (bot.py
+# id="health_weekly_analysis", modules/health_monitor.py) to go completely
+# unlisted — keep this in sync with bot.py's scheduler.add_job() block.
+HARDCODED_REPORTS = [
+    {
+        "id": "health_weekly_analysis",
+        "label": "📊 Weekly Health & Learn Report",
+        "when": "逢星期一 09:00 | Every Monday 09:00",
+        "note": "自動分析上星期錯誤日誌 + 學習摘要 | auto error-log analysis + learning summary",
+    },
+    {
+        "id": "family_daily_digest",
+        "label": "👨‍👩‍👧‍👦 Family Daily Digest",
+        "when": "每日 23:00 | Daily 23:00",
+        "note": "屋企人(例如 Isaac)今日同 bot 互動嘅摘要 | today's family-member interactions summary",
+    },
+]
+
+
 def format_my_reports() -> str:
     """Human list of just the configured recurring REPORTS (e.g. the weekly
-    uric acid report) — separate from /schedules, which dumps every schedule
+    food log report) — separate from /schedules, which dumps every schedule
     (news/crypto/quiz included) as raw entries. Built because "/report" is a
     different, unrelated feature (an on-demand one-off daily briefing) that
     was getting confused for "show me my configured reports" — see chat
-    2026-09-11 for the mixup this was built to fix."""
+    2026-09-11 for the mixup this was built to fix.
+
+    Includes both dynamic (data/schedules.json) reports AND the hardcoded
+    ones in HARDCODED_REPORTS — the first version of this only covered the
+    former and silently missed the Weekly Health & Learn Report entirely."""
     jobs = schedule_load_all()
     report_jobs = {jid: j for jid, j in jobs.items() if is_report_action(j.get("action", ""))}
-    if not report_jobs:
+    if not report_jobs and not HARDCODED_REPORTS:
         return (
             "你暫時未有設定任何定期報告。\n"
             "You don't have any recurring reports set up yet."
@@ -3518,6 +3544,10 @@ def format_my_reports() -> str:
         else:
             when = f"每日 {time_str} | Daily {time_str}"
         lines.append(f"{status}\n{j.get('label', j.get('action'))}\n{when}\nID: {jid}\n")
+    if HARDCODED_REPORTS:
+        lines.append("— 內置系統報告 | Built-in system reports —")
+        for r in HARDCODED_REPORTS:
+            lines.append(f"▶️ 運行中 | Active\n{r['label']}\n{r['when']}\n{r['note']}\n")
     lines.append(
         "其他日常推送(新聞/crypto/quiz)請睇 /schedules\n"
         "Other recurring pushes (news/crypto/quiz) — see /schedules for the full list"

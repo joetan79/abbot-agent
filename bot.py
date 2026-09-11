@@ -461,29 +461,79 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not (is_private or bot_mentioned or is_reply_to_bot):
         return
 
-    await msg.chat.send_action("typing")
     caption = msg.caption or ""
     # Remove bot mention from caption if present
     if context.bot.username:
         caption = caption.replace(f"@{context.bot.username}", "").strip()
+    is_owner_sender = is_owner(update.effective_user.id if update.effective_user else 0)
 
+    # Telegram delivers a multi-photo "album" (media group) as separate
+    # messages, with the caption attached to only ONE of them — and there's
+    # no guarantee that one is processed first. Buffer every photo sharing a
+    # media_group_id for a short window so they're analysed TOGETHER as one
+    # meal (one combined vision call, one log entry) once the whole album is
+    # in, instead of each photo firing its own reply immediately. See chat
+    # 2026-09-11 13:37-13:41 / _MEDIA_GROUP_WAIT_SECONDS below.
+    if msg.media_group_id:
+        group_id = msg.media_group_id
+        entry = _media_group_buffer.get(group_id)
+        if entry is None:
+            entry = {"photos": [], "caption": "", "chat_id": chat_id, "is_owner_sender": is_owner_sender, "reply_msg": msg}
+            _media_group_buffer[group_id] = entry
+            asyncio.create_task(_flush_media_group(group_id, context.bot))
+        entry["photos"].append(msg.photo)
+        if caption:
+            entry["caption"] = caption
+        return
+
+    await msg.chat.send_action("typing")
+    await _process_photo_batch(context.bot, chat_id, [msg.photo], caption, is_owner_sender, msg)
+
+
+_media_group_buffer: dict = {}
+_MEDIA_GROUP_WAIT_SECONDS = 2.5  # generous margin over how long Telegram typically takes to deliver every photo in an album
+
+
+async def _flush_media_group(group_id: str, bot) -> None:
+    await asyncio.sleep(_MEDIA_GROUP_WAIT_SECONDS)
+    entry = _media_group_buffer.pop(group_id, None)
+    if not entry or not entry["photos"]:
+        return
+    await bot.send_chat_action(chat_id=entry["chat_id"], action="typing")
+    await _process_photo_batch(bot, entry["chat_id"], entry["photos"], entry["caption"], entry["is_owner_sender"], entry["reply_msg"])
+
+
+async def _process_photo_batch(bot, chat_id: int, photos: list, caption: str, is_owner_sender: bool, reply_msg) -> None:
+    """Routes a collected batch of one or more same-meal photos. `reply_msg`
+    is whichever Update.message we have handy to reply into (first photo of
+    an album, or the lone photo) — purely for a nicer threaded reply in
+    Telegram; the actual send always targets chat_id."""
     # Gout/uric acid food diary — only the owner, and only when the caption
     # marks it as food (keeps it separate from homework/general photos on
     # this same handler). "ask"/"問" wins over the log keywords — e.g. "ask
     # food"/"問餐" answers without saving to the diary. See modules/gout_tracker.py.
-    is_owner_sender = is_owner(update.effective_user.id if update.effective_user else 0)
-    if is_owner_sender and gout_tracker.is_food_query_caption(caption):
-        reply = await gout_tracker.query_meal_photo(context.bot, msg.photo, caption)
-        await msg.reply_text(f"🩺 {reply}")
+    food_mode = None
+    if is_owner_sender:
+        if gout_tracker.is_food_query_caption(caption):
+            food_mode = "query"
+        elif gout_tracker.is_food_log_caption(caption):
+            food_mode = "log"
+    logger.info(f"DEBUG photo batch caption={caption!r} n_photos={len(photos)} food_mode={food_mode}")
+
+    if food_mode == "query":
+        reply = await gout_tracker.query_meal_photo(bot, photos, caption)
+        await reply_msg.reply_text(f"🩺 {reply}")
         return
-    if is_owner_sender and gout_tracker.is_food_log_caption(caption):
-        reply = await gout_tracker.analyze_meal_photo(context.bot, msg.photo, caption)
-        await msg.reply_text(f"🩺 {reply}")
+    if food_mode == "log":
+        reply = await gout_tracker.analyze_meal_photo(bot, photos, caption)
+        await reply_msg.reply_text(f"🩺 {reply}")
         return
 
-    reply = await handle_photo(context.bot, msg.photo, caption)
-    sent = await msg.reply_text(f"🖼 {reply}")
-    photo_cache_set(sent.message_id, msg.photo[-1].file_id)
+    # Generic (non-food) — unchanged: one reply per photo.
+    for photo in photos:
+        reply = await handle_photo(bot, photo, caption)
+        sent = await bot.send_message(chat_id=chat_id, text=f"🖼 {reply}")
+        photo_cache_set(sent.message_id, photo[-1].file_id)
 
 async def cmd_clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear conversation history for fresh start."""
