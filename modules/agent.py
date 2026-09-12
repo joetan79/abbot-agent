@@ -97,6 +97,25 @@ def _build_quiz_status_text() -> str:
         return f"QUIZ STATUS: unavailable ({e})"
 
 
+# gout_diet.md is a general HEALTH knowledge base (uric acid/gout is the #1
+# priority within it, not the only topic) — keep this list in sync with what
+# the skill file actually covers whenever either one grows. See the skill
+# file's own header note.
+_HEALTH_TOPIC_KEYWORDS = [
+    "尿酸", "痛風", "嘌呤", "gout", "uric acid", "purine",
+    "糖分", "血糖", "糖尿", "砂糖", "白糖", "糖", "sugar", "blood sugar", "glucose", "fructose",
+    "脂肪", "膽固醇", "cholesterol", "fat", "saturated fat",
+    "心臟", "heart", "血壓", "blood pressure", "血液", "blood",
+    "熱量", "calories", "卡路里", "肥胖", "obesity", "體重", "weight",
+    "鈉", "sodium", "鹽分",
+]
+
+
+def _mentions_gout_topic(*texts: str) -> bool:
+    combined = " ".join(t or "" for t in texts).lower()
+    return any(kw.lower() in combined for kw in _HEALTH_TOPIC_KEYWORDS)
+
+
 def build_owner_system_prompt(user_id: str, text: str = "") -> str:
     """Build a rich, context-aware system prompt for the owner."""
     import pytz
@@ -106,6 +125,19 @@ def build_owner_system_prompt(user_id: str, text: str = "") -> str:
     now_utc8 = datetime.now(pytz.timezone('Asia/Kuala_Lumpur'))
     now = now_utc8.strftime("%A, %d %B %Y %H:%M (UTC+8)")
     skills_text = load_skills(scope="core")
+    # General chat only ever loaded "core" skills — a follow-up nutrition
+    # question that doesn't hit one of the dedicated food_log_* intents (e.g.
+    # "但有砂糖不怕影響？", a bare pronoun-only follow-up with no keyword of
+    # its own) got answered from Claude's general knowledge instead of the
+    # purine/calorie reference in gout_diet.md. Load it too whenever the
+    # current message OR the recent conversation is clearly on that topic —
+    # checking history as well as the current text is what catches a bare
+    # follow-up that doesn't repeat any keyword itself. See chat 2026-09-12.
+    if _mentions_gout_topic(text, recent_history):
+        from modules.skills_loader import SKILLS_DIR
+        gout_file = SKILLS_DIR / "gout_diet.md"
+        if gout_file.exists():
+            skills_text += "\n\n" + gout_file.read_text()
     quiz_status = _build_quiz_status_text()
 
     # Episodic long-term memory
@@ -536,7 +568,7 @@ photo meals are handled separately by caption keyword, not through this classifi
   new meal.
   Examples: "補充：不是豬雜，只是燒肉", "actually it's just roast pork, no organ meat",
   "no it wasn't beef, it was pork"
-- "food_log_status": user asks what's currently logged today/tonight (a plain
+- "food_log_status": user asks what's currently logged for a given day (a plain
   factual listing, NOT the weekly pattern report — that's food_report). ONLY use
   this when the message EXPLICITLY says it's about food/meals/diet — e.g. contains
   "food log", "飲食記錄", "餐記錄", "dinner log", "lunch log", "meal log", "尿酸記錄",
@@ -544,7 +576,15 @@ photo meals are handled separately by caption keyword, not through this classifi
   A BARE "what's my log" / "show me the log" / "log係咩" with NO food/meal/diet
   qualifier is AMBIGUOUS — there may be other kinds of logs (e.g. schedules, tasks)
   — use "chat" instead so ABbot asks which log they mean, rather than assuming food.
-  Examples: "what's my food log today", "今日 food log 係咩", "show today's dinner log"
+  Entries persist until the next Monday weekly report clears them, so "yesterday"
+  and "this week" are valid real queries, not just "today" — extract which day into
+  "action": "today" (default), "yesterday", "week"/"this week", a weekday name, or
+  an explicit date. Never leave this to general chat — it has no access to the
+  actual log and will confidently make up a "no records" answer instead of admitting
+  it can't check (see chat 2026-09-12: asked "what's yesterday's food log", got a
+  fabricated bilingual table claiming no entries existed).
+  Examples: "what's my food log today", "今日 food log 係咩", "show today's dinner log",
+  "昨天嘅food log呢", "yesterday's food log", "this week's food log", "呢個星期嘅飲食記錄"
   NOT this intent (too vague, use "chat"): "what's my log", "show me the log", "log係咩"
 
 GOUT EXAMPLES:
@@ -556,8 +596,10 @@ GOUT EXAMPLES:
 "delete the omelet food log" → {"intent":"food_log_delete","action":"omelet"}
 "補充：不是豬雜，只是燒肉" → {"intent":"food_log_correct","action":"不是豬雜，只是燒肉"}
 "是燒豬肉而已，沒有內臟" → {"intent":"food_log_correct","action":"是燒豬肉而已，沒有內臟"}
-"好，所以今晚的dinner log是？" → {"intent":"food_log_status"}
-"今日 food log 係咩" → {"intent":"food_log_status"}
+"好，所以今晚的dinner log是？" → {"intent":"food_log_status","action":"today"}
+"今日 food log 係咩" → {"intent":"food_log_status","action":"today"}
+"昨天嘅food log呢" → {"intent":"food_log_status","action":"yesterday"}
+"what's my food log this week" → {"intent":"food_log_status","action":"week"}
 "what's my log" → {"intent":"chat","action":"user asked about \"my log\" with no food/meal qualifier — ask which log they mean (e.g. food log?)"}
 
 SCHEDULE PAUSE/RESUME RULES:
@@ -2208,16 +2250,21 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if update.message.reply_to_message:
         replied = update.message.reply_to_message
 
-        # If the replied-to message was a bot image analysis, re-analyse the original photo
+        # If the replied-to message was a bot image analysis (or the user's
+        # own food-photo message), re-analyse the original photo — with the
+        # SAME skill scope it was originally analysed under (gout vs. study),
+        # so e.g. a food-diary follow-up doesn't lose the purine/calorie
+        # reference. See photo_cache_set's docstring for the bug this fixes.
         from modules.utils import photo_cache_get, photo_cache_set, handle_photo_reanalysis
-        cached_file_id = photo_cache_get(replied.message_id)
-        if cached_file_id and original_text.strip():
+        cached = photo_cache_get(replied.message_id)
+        if cached and original_text.strip():
             await update.message.chat.send_action("typing")
-            reply = await handle_photo_reanalysis(context.bot, cached_file_id, original_text)
+            reply = await handle_photo_reanalysis(context.bot, cached["file_id"], original_text, scope=cached["scope"])
             from modules.message_manager import track_bot_message
-            sent_msg = await update.message.reply_text(f"🖼 {reply}")
+            prefix = "🩺" if cached["scope"] == "gout" else "🖼"
+            sent_msg = await update.message.reply_text(f"{prefix} {reply}")
             track_bot_message(update.effective_chat.id, sent_msg.message_id)
-            photo_cache_set(sent_msg.message_id, cached_file_id)
+            photo_cache_set(sent_msg.message_id, cached["file_id"], scope=cached["scope"])
             return
 
         replied_text = (replied.text or replied.caption or "").strip()
@@ -3331,8 +3378,9 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(f"🩺 {reply}")
 
     elif intent == "food_log_status":
-        from modules.gout_tracker import get_today_summary
-        text = f"🩺 {get_today_summary()}"
+        from modules.gout_tracker import get_log_summary
+        day_ref = (intent_data.get("action") or "today").strip()
+        text = f"🩺 {get_log_summary(day_ref)}"
         # Full per-meal analysis (purine + secondary indicators) can add up
         # across multiple meals in a day — chunk on paragraph boundaries so a
         # long day's log doesn't silently fail to send past Telegram's 4096

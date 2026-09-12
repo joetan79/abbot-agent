@@ -734,9 +734,15 @@ async def handle_photo(bot, photo, caption: str = "") -> str:
         return "Sorry, I couldn't process that image. Please try again."
 
 
-def photo_cache_set(message_id: int, file_id: str):
+def photo_cache_set(message_id: int, file_id: str, scope: str = "study"):
+    """`scope` picks which skills a later reply-triggered re-analysis loads
+    (see handle_photo_reanalysis) — "study" for homework/general photos,
+    "gout" for food-diary photos. Without this, replying to a food photo's
+    analysis (or to your own photo message) re-analysed it with generic
+    homework skills instead of the purine/calorie reference — see chat
+    2026-09-12 ("一天一包可好？" replying to an "ask 這如何？" food photo)."""
     cache = _load(PHOTO_CACHE_FILE)
-    cache[str(message_id)] = file_id
+    cache[str(message_id)] = {"file_id": file_id, "scope": scope}
     # Keep at most 200 entries to avoid unbounded growth
     if len(cache) > 200:
         oldest_keys = list(cache.keys())[:-200]
@@ -745,13 +751,24 @@ def photo_cache_set(message_id: int, file_id: str):
     _save(PHOTO_CACHE_FILE, cache)
 
 
-def photo_cache_get(message_id: int) -> str | None:
+def photo_cache_get(message_id: int) -> dict | None:
+    """Returns {"file_id": ..., "scope": ...}, or None if not cached.
+    Transparently upgrades pre-existing bare-string entries (file_id only,
+    from before `scope` was added) to scope="study"."""
     cache = _load(PHOTO_CACHE_FILE)
-    return cache.get(str(message_id))
+    entry = cache.get(str(message_id))
+    if entry is None:
+        return None
+    if isinstance(entry, str):
+        return {"file_id": entry, "scope": "study"}
+    return entry
 
 
-async def handle_photo_reanalysis(bot, file_id: str, user_question: str) -> str:
-    """Re-analyze a cached photo with a follow-up question or correction."""
+async def handle_photo_reanalysis(bot, file_id: str, user_question: str, scope: str = "study") -> str:
+    """Re-analyze a cached photo with a follow-up question or correction.
+    `scope` should match whatever was passed to photo_cache_set() for this
+    photo — "gout" for a food-diary photo, so the follow-up gets answered
+    with the purine/calorie reference instead of generic study skills."""
     try:
         import base64
         import httpx
@@ -768,7 +785,7 @@ async def handle_photo_reanalysis(bot, file_id: str, user_question: str) -> str:
         r = claude.messages.create(
             model=MODEL_SMART,
             max_tokens=1500,
-            system=load_skills(scope="study"),
+            system=load_skills(scope=scope),
             messages=[{
                 "role": "user",
                 "content": [

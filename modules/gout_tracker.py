@@ -31,6 +31,7 @@ FOOD_LOG_KEYWORDS = [
 FOOD_QUERY_KEYWORDS = ["ask", "問"]
 
 LEVEL_EMOJI = {"🔴": "high", "🟡": "moderate", "🟢": "low"}
+LEVELS_KEYS = ["purine", "sugar", "heart", "bp", "weight"]
 
 
 def is_food_log_caption(caption: str) -> bool:
@@ -63,18 +64,89 @@ def _extract_level(text: str) -> str:
     return min(positions, key=lambda p: p[0])[1]
 
 
-def _add_entry(source: str, description: str, analysis: str) -> None:
+def _parse_levels_tag(text: str) -> tuple:
+    """Splits off the 'LEVELS: purine=high|sugar=moderate|...' machine-
+    readable tag Claude appends per gout_diet.md (step 7 of "When logging a
+    meal"), returning (display_text_with_the_tag_line_removed, levels_dict).
+    ABbot is a general health advisor now, not just a uric-acid tracker — this
+    is what lets _recent_pattern_context() detect a bad STREAK on blood
+    pressure/sugar/heart/weight specifically, not only purine.
+
+    Scans for "LEVELS:" ANYWHERE within each line (not requiring it at
+    position 0, and not requiring the line to BE just the tag) so it survives
+    Claude wrapping the tag in markdown — backtick code-span, bold, a leading
+    bullet — which it does fairly often despite being told this is a plain
+    machine-readable line. A line that contains the marker is dropped
+    entirely from the displayed text, wrapper and all. Falls back to the old
+    single-emoji purine extraction if the tag is missing/malformed — e.g.
+    older entries logged before this existed, or the model forgot to add it —
+    so nothing crashes on partial/legacy data."""
+    lines = text.split("\n")
+    levels = {}
+    kept_lines = []
+    for line in lines:
+        upper = line.upper()
+        if "LEVELS:" in upper:
+            idx = upper.index("LEVELS:")
+            tag_body = line[idx + len("LEVELS:"):]
+            for pair in tag_body.split("|"):
+                if "=" not in pair:
+                    continue
+                k, v = pair.split("=", 1)
+                k = k.strip().strip("`*_").lower()
+                v = v.strip().strip("`*_").lower()
+                if k in LEVELS_KEYS and v in ("low", "moderate", "high"):
+                    levels[k] = v
+        else:
+            kept_lines.append(line)
+    display_text = "\n".join(kept_lines).rstrip()
+    if "purine" not in levels:
+        levels["purine"] = _extract_level(display_text)
+    return display_text, levels
+
+
+def _record_history(user_turn: str, assistant_turn: str) -> None:
+    """Adds this food interaction to the normal conversation history so a
+    bare text follow-up (e.g. "糖分是否會很高？" with no reply-to and no
+    keyword of its own) can still work via the general chat handler's
+    ask_claude_with_history — previously EVERY food log/query interaction
+    (photo or text, saved or not) was invisible to conversation history
+    entirely, since these functions call ask_claude directly instead of
+    ask_claude_with_history. That's the actual root cause behind "the bot
+    forgot what food we were just discussing" — not a reply-to-message
+    problem (already fixed separately) and not a missing-skill problem
+    (also already fixed) but the interaction never being recorded at all.
+    See chat 2026-09-12 17:38 — "ask this ok?" photo query at 17:37 was
+    completely absent from history_summary() a minute later."""
+    from modules.utils import OWNER_CHAT_ID, history_add
+    if not OWNER_CHAT_ID:
+        return
+    try:
+        history_add(str(OWNER_CHAT_ID), "user", user_turn[:500])
+        history_add(str(OWNER_CHAT_ID), "assistant", assistant_turn[:1500])
+    except Exception as e:
+        logger.error(f"[Gout] history_add failed: {e}")
+
+
+def _add_entry(source: str, description: str, analysis: str) -> str:
+    """Stores the entry — with the LEVELS tag parsed into structured data and
+    stripped from the saved/displayed text — and returns the CLEANED analysis.
+    Callers must send this return value back to Joe, not the raw `analysis`
+    they passed in (which still has the machine-readable tag in it)."""
     log = _load_log()
     entry_id = uuid.uuid4().hex[:10]
+    display_text, levels = _parse_levels_tag(analysis)
     log[entry_id] = {
         "id": entry_id,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "source": source,  # "photo" or "text"
         "description": description[:200],
-        "analysis": analysis,
-        "level": _extract_level(analysis),
+        "analysis": display_text,
+        "level": levels.get("purine", "unknown"),
+        "levels": levels,
     }
     _save_log(log)
+    return display_text
 
 
 def remove_entry(hint: str = "") -> str:
@@ -140,19 +212,25 @@ def correct_last_entry(correction_text: str) -> str:
         f"Joe is now correcting that: {correction_text}\n\n"
         "Re-identify the food and re-rate its purine load taking the correction "
         "into account. Write it as ONE complete, fresh meal log entry reflecting "
-        "the correction — don't just describe what changed.\n\n"
-        "At the very end, on its own line, add a short plain-text summary of the "
-        "CORRECTED meal only (just the food items, comma-separated, no formatting, "
-        "no old/wrong items), in Traditional Chinese matching the food names Joe "
-        "used, prefixed exactly with 'SUMMARY: ' — e.g. 'SUMMARY: 苦瓜湯、燒豬肉、白飯、3隻蛋'."
+        "the correction — don't just describe what changed. Still include the "
+        "usual LEVELS tag per the rules above.\n\n"
+        "Then, on its own line AFTER the LEVELS tag, add a short plain-text summary "
+        "of the CORRECTED meal only (just the food items, comma-separated, no "
+        "formatting, no old/wrong items), in Traditional Chinese matching the food "
+        "names Joe used, prefixed exactly with 'SUMMARY: ' — e.g. "
+        "'SUMMARY: 苦瓜湯、燒豬肉、白飯、3隻蛋'."
     )
     raw = ask_claude(system, prompt, max_tokens=900, model=MODEL_SMART)
 
-    # Split off the SUMMARY line so the stored description reflects the
-    # CORRECTED meal cleanly — previously this concatenated the old (now
-    # wrong) description with "(corrected: ...)", so a status listing like
-    # get_today_summary() showed both the stale wrong items and the fix
-    # stacked together, and each further correction made it worse.
+    # Strip LEVELS first (it can land before or after SUMMARY depending on
+    # how closely the model follows "after the LEVELS tag" above — the line-
+    # based scan in _parse_levels_tag finds it either way), then split off
+    # the SUMMARY line so the stored description reflects the CORRECTED meal
+    # cleanly — previously this concatenated the old (now wrong) description
+    # with "(corrected: ...)", so a status listing like get_today_summary()
+    # showed both the stale wrong items and the fix stacked together, and
+    # each further correction made it worse.
+    raw, levels = _parse_levels_tag(raw)
     match = re.search(r"\n *SUMMARY:\s*(.+?)\s*$", raw, re.IGNORECASE | re.DOTALL)
     if match:
         description = match.group(1).strip()
@@ -169,38 +247,86 @@ def correct_last_entry(correction_text: str) -> str:
         "source": last["source"],
         "description": description[:200],
         "analysis": analysis,
-        "level": _extract_level(analysis),
+        "level": levels.get("purine", "unknown"),
+        "levels": levels,
     }
     _save_log(log)
+    _record_history(f"[Corrected a food log entry] {correction_text}", analysis)
     return analysis
 
 
-def get_today_summary() -> str:
-    """Everything actually logged today, read straight from the log file —
-    used to answer "what's my log tonight/today" honestly instead of letting
-    the general chat fallback improvise an answer from stale conversation
-    history (it has no access to the real data at all).
+_LEVEL_LABEL = {
+    "high": "🔴 高/High", "moderate": "🟡 中/Moderate",
+    "low": "🟢 低/Low", "unknown": "⚪ 未知/Unknown",
+}
+_DOW_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
+def get_log_summary(day_ref: str = "today") -> str:
+    """Everything actually logged for a given day (or the past week), read
+    straight from the log file — used to answer "what's my log today/
+    yesterday/this week" honestly instead of letting the general chat
+    fallback improvise an answer from stale conversation history (it has no
+    access to the real data at all, and will confidently fabricate a "no
+    records" table rather than admit it can't check — see chat 2026-09-12).
+
+    Entries persist until the NEXT weekly report fires (send_weekly_report
+    clears only what it just reported on) — so "yesterday" or "this week"
+    are valid, real queries right up until Monday's report, not just "today".
+
+    day_ref: "today"/"yesterday" (also 今日/今天/昨日/昨天), a weekday name
+    ("monday".."sunday", matching the most recent past occurrence — "today"
+    if today IS that weekday), "week"/"this week" (也支援 本週/呢個星期,
+    past 7 days), or an explicit "YYYY-MM-DD" date. Unrecognised input falls
+    back to "today".
 
     Shows each entry's FULL stored analysis (purine/calories/heart/weight +
     suggestions) — the same detail already shown when the meal was logged —
     not just a bare one-line food list, since that fuller breakdown is the
     actual point of checking the log."""
     log = _load_log()
-    today = datetime.now().strftime("%Y-%m-%d")
-    todays = [e for e in log.values() if e["timestamp"].startswith(today)]
-    if not todays:
-        return "今日仲未記錄任何嘢。\nNothing logged today yet."
-    todays.sort(key=lambda e: e["timestamp"])
-    level_label = {
-        "high": "🔴 高/High", "moderate": "🟡 中/Moderate",
-        "low": "🟢 低/Low", "unknown": "⚪ 未知/Unknown",
-    }
+    now = datetime.now()
+    ref = (day_ref or "today").strip().lower()
+
+    if ref in ("week", "this week", "本週", "本周", "呢個星期", "這星期", "這一星期"):
+        cutoff = now - timedelta(days=7)
+        matches = [e for e in log.values() if datetime.fromisoformat(e["timestamp"]) >= cutoff]
+        label = "本週 | This week"
+    else:
+        if ref in ("today", "今日", "今天"):
+            target_date = now.date()
+        elif ref in ("yesterday", "昨日", "昨天"):
+            target_date = (now - timedelta(days=1)).date()
+        elif ref in _DOW_NAMES:
+            days_back = (now.weekday() - _DOW_NAMES.index(ref)) % 7
+            target_date = (now - timedelta(days=days_back)).date()
+        else:
+            try:
+                target_date = datetime.strptime(ref, "%Y-%m-%d").date()
+            except ValueError:
+                target_date = now.date()
+        date_str = target_date.strftime("%Y-%m-%d")
+        matches = [e for e in log.values() if e["timestamp"].startswith(date_str)]
+        label = date_str
+
+    if not matches:
+        return (
+            f"{label} 冇任何記錄（可能已經隨住週報清咗，或者嗰日冇記錄）。\n"
+            f"No entries for {label} (may already have been cleared by a weekly report, or nothing was logged that day)."
+        )
+
+    matches.sort(key=lambda e: e["timestamp"])
     blocks = [
-        f"🕐 {e['timestamp'][11:16]} 整體 {level_label.get(e.get('level', 'unknown'), '⚪')} — {e['description']}\n\n{e['analysis']}"
-        for e in todays
+        f"🕐 {e['timestamp'][11:16]} 整體 {_LEVEL_LABEL.get(e.get('level', 'unknown'), '⚪')} — {e['description']}\n\n{e['analysis']}"
+        for e in matches
     ]
-    header = f"今日飲食記錄 | Today's food log（共 {len(todays)} 餐 | {len(todays)} meal(s)）"
+    header = f"{label} 飲食記錄 | Food log for {label}（共 {len(matches)} 餐 | {len(matches)} meal(s)）"
     return header + "\n\n" + "\n\n---\n\n".join(blocks)
+
+
+def get_today_summary() -> str:
+    """Back-compat wrapper — see get_log_summary()."""
+    return get_log_summary("today")
 
 
 def get_entries_since(days: int = 7) -> list:
@@ -216,6 +342,48 @@ def get_entries_since(days: int = 7) -> list:
             entries.append(e)
     entries.sort(key=lambda e: e["timestamp"])
     return entries
+
+
+_INDICATOR_LABEL = {
+    "purine": "purine", "sugar": "blood sugar", "heart": "heart/cholesterol",
+    "bp": "blood pressure", "weight": "weight",
+}
+
+
+def _recent_pattern_context(days: int = 3) -> str:
+    """Short per-INDICATOR summary of recent ratings (BEFORE the meal
+    currently being logged), injected into the analysis prompt so Claude's
+    tone can reflect an emerging pattern on ANY of the five health areas —
+    not just purine, and not just react to this one meal in isolation. ABbot
+    is a general health advisor now, so a 3-day run of 🔴 blood pressure
+    deserves the same callout as a 3-day run of 🔴 purine, even if purine
+    itself looks fine that week. See gout_diet.md's "Tone escalation" rules
+    for how this gets used; this function only supplies the facts, never the
+    tone itself. Older entries logged before the LEVELS tag existed only have
+    a purine level (from the legacy single-emoji extraction) — that's fine,
+    they just won't contribute to the other four indicators' counts."""
+    entries = get_entries_since(days=days)
+    if not entries:
+        return ""
+    per_indicator = {k: {"high": 0, "moderate": 0, "low": 0} for k in LEVELS_KEYS}
+    for e in entries:
+        levels = e.get("levels") or {"purine": e.get("level", "unknown")}
+        for k, v in levels.items():
+            if k in per_indicator and v in per_indicator[k]:
+                per_indicator[k][v] += 1
+    lines = []
+    for k in LEVELS_KEYS:
+        c = per_indicator[k]
+        if c["high"] or c["moderate"]:
+            lines.append(f"{_INDICATOR_LABEL[k]}: {c['high']} high, {c['moderate']} moderate, {c['low']} low")
+    if not lines:
+        return ""
+    return (
+        f"Context (not this meal — Joe's last {days} days before it, per indicator):\n"
+        + "\n".join(lines)
+        + "\nFactor this into your tone per the Tone escalation rules — track each "
+        "indicator's own streak separately, don't just repeat these numbers verbatim."
+    )
 
 
 async def _vision_analyze_ids(bot, file_ids: list, caption: str, will_log: bool) -> str:
@@ -253,9 +421,11 @@ async def _vision_analyze_ids(bot, file_ids: list, caption: str, will_log: bool)
         "dishes on the table) — analyse and rate them together as ONE meal, not separately."
         if len(file_ids) > 1 else ""
     )
+    recent_ctx = _recent_pattern_context()
     prompt = (
         (f"Caption: {caption}\n\n" if caption else "") +
-        f"{intent_line}{multi_note} Identify the food and rate its purine load per the rules above."
+        f"{intent_line}{multi_note} Identify the food and rate its purine load per the rules above." +
+        (f"\n\n{recent_ctx}" if recent_ctx else "")
     )
     content.append({"type": "text", "text": prompt})
 
@@ -280,8 +450,9 @@ async def analyze_meal_photo(bot, photos, caption: str = "") -> str:
     try:
         file_ids = [p[-1].file_id for p in photos]
         analysis = await _vision_analyze_ids(bot, file_ids, caption, will_log=True)
-        _add_entry("photo", caption or "(photo)", analysis)
-        return analysis
+        display_text = _add_entry("photo", caption or "(photo)", analysis)
+        _record_history(f"[Logged a food photo] {caption or '(no caption)'}", display_text)
+        return display_text
     except Exception as e:
         logger.error(f"[Gout] photo analysis failed: {e}")
         return "Sorry, I couldn't analyse that meal photo. Please try again."
@@ -289,10 +460,18 @@ async def analyze_meal_photo(bot, photos, caption: str = "") -> str:
 
 async def query_meal_photo(bot, photos, caption: str = "") -> str:
     """Like analyze_meal_photo but does NOT save to the food diary — for the
-    "ask food"/"問餐" quick-lookup trigger (see is_food_query_caption)."""
+    "ask food"/"問餐" quick-lookup trigger (see is_food_query_caption). Still
+    strips the LEVELS tag (per gout_diet.md's format, unconditional on
+    logging) so Joe never sees the raw machine-readable line. Still recorded
+    to conversation history even though it's not saved to the diary — a
+    "just asking" photo is exactly the kind of thing a bare text follow-up
+    refers back to (see _record_history's docstring)."""
     try:
         file_ids = [p[-1].file_id for p in photos]
-        return await _vision_analyze_ids(bot, file_ids, caption, will_log=False)
+        analysis = await _vision_analyze_ids(bot, file_ids, caption, will_log=False)
+        display_text, _levels = _parse_levels_tag(analysis)
+        _record_history(f"[Asked about a food photo] {caption or '(no caption)'}", display_text)
+        return display_text
     except Exception as e:
         logger.error(f"[Gout] photo query failed: {e}")
         return "Sorry, I couldn't analyse that meal photo. Please try again."
@@ -304,13 +483,16 @@ def analyze_meal_text(description: str) -> str:
     from modules.skills_loader import load_skills
 
     system = load_skills(scope="gout")
+    recent_ctx = _recent_pattern_context()
     prompt = (
         f"Joe is logging this meal for gout/uric acid tracking: {description}\n\n"
         "Identify the food and rate its purine load per the rules above."
+        + (f"\n\n{recent_ctx}" if recent_ctx else "")
     )
     analysis = ask_claude(system, prompt, max_tokens=900, model=MODEL_SMART)
-    _add_entry("text", description, analysis)
-    return analysis
+    display_text = _add_entry("text", description, analysis)
+    _record_history(f"[Logged a meal] {description}", display_text)
+    return display_text
 
 
 async def send_weekly_report(bot) -> None:

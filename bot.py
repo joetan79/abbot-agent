@@ -520,13 +520,21 @@ async def _process_photo_batch(bot, chat_id: int, photos: list, caption: str, is
             food_mode = "log"
     logger.info(f"DEBUG photo batch caption={caption!r} n_photos={len(photos)} food_mode={food_mode}")
 
-    if food_mode == "query":
-        reply = await gout_tracker.query_meal_photo(bot, photos, caption)
-        await reply_msg.reply_text(f"🩺 {reply}")
-        return
-    if food_mode == "log":
-        reply = await gout_tracker.analyze_meal_photo(bot, photos, caption)
-        await reply_msg.reply_text(f"🩺 {reply}")
+    if food_mode in ("query", "log"):
+        if food_mode == "query":
+            reply = await gout_tracker.query_meal_photo(bot, photos, caption)
+        else:
+            reply = await gout_tracker.analyze_meal_photo(bot, photos, caption)
+        sent = await reply_msg.reply_text(f"🩺 {reply}")
+        # Cache with scope="gout" so a later reply (to either the original
+        # photo message or this bot reply) re-analyses with the purine/
+        # calorie reference instead of generic study skills — previously
+        # food photos were never cached at all, so a follow-up like "would
+        # one packet a day be OK?" replying to an "ask 這如何？" food photo
+        # lost the image entirely. See chat 2026-09-12.
+        fid = photos[0][-1].file_id
+        photo_cache_set(reply_msg.message_id, fid, scope="gout")
+        photo_cache_set(sent.message_id, fid, scope="gout")
         return
 
     # Generic (non-food) — unchanged: one reply per photo.
