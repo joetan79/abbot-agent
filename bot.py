@@ -525,7 +525,11 @@ async def _process_photo_batch(bot, chat_id: int, photos: list, caption: str, is
             reply = await gout_tracker.query_meal_photo(bot, photos, caption)
         else:
             reply = await gout_tracker.analyze_meal_photo(bot, photos, caption)
-        sent = await reply_msg.reply_text(f"🩺 {reply}")
+        # Longer-than-default network timeout — a full meal analysis
+        # (purine + all 4 secondary indicators) is large enough to
+        # occasionally exceed python-telegram-bot's 5s default. See
+        # food_log_status's comment in modules/agent.py for the bug this avoids.
+        sent = await reply_msg.reply_text(f"🩺 {reply}", read_timeout=20.0, write_timeout=20.0, connect_timeout=20.0)
         # Cache with scope="gout" so a later reply (to either the original
         # photo message or this bot reply) re-analyses with the purine/
         # calorie reference instead of generic study skills — previously

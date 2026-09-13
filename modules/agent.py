@@ -3351,7 +3351,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             await update.message.chat.send_action("typing")
             reply = analyze_meal_text(description)
-            await update.message.reply_text(f"🩺 {reply}")
+            await update.message.reply_text(f"🩺 {reply}", read_timeout=20.0, write_timeout=20.0, connect_timeout=20.0)
 
     elif intent == "food_report":
         from modules.gout_tracker import send_weekly_report
@@ -3375,7 +3375,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             await update.message.chat.send_action("typing")
             reply = correct_last_entry(correction)
-            await update.message.reply_text(f"🩺 {reply}")
+            await update.message.reply_text(f"🩺 {reply}", read_timeout=20.0, write_timeout=20.0, connect_timeout=20.0)
 
     elif intent == "food_log_status":
         from modules.gout_tracker import get_log_summary
@@ -3385,20 +3385,48 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # across multiple meals in a day — chunk on paragraph boundaries so a
         # long day's log doesn't silently fail to send past Telegram's 4096
         # char cap. Same guard as gcal_add_multi's chunking.
+        #
+        # A multi-meal reply is also large enough to routinely exceed
+        # python-telegram-bot's 5s DEFAULT network timeout — that previously
+        # surfaced as a bare "Timed out" exception that aborted the ENTIRE
+        # reply, silently dropping any chunk not yet sent with no error shown
+        # to Joe (a day with breakfast/lunch/dinner logged could come back
+        # missing dinner, looking like a data bug rather than a network one).
+        # See chat 2026-09-13 — "昨天food log" came back incomplete.
         TELEGRAM_MSG_LIMIT = 3500
+        SEND_TIMEOUT = 20.0
         if len(text) <= TELEGRAM_MSG_LIMIT:
-            await update.message.reply_text(text)
+            chunks = [text]
         else:
-            parts = text.split("\n\n")
+            chunks = []
             chunk, chunk_len = [], 0
-            for p in parts:
+            for p in text.split("\n\n"):
                 if chunk and chunk_len + len(p) + 2 > TELEGRAM_MSG_LIMIT:
-                    await update.message.reply_text("\n\n".join(chunk))
+                    chunks.append("\n\n".join(chunk))
                     chunk, chunk_len = [], 0
                 chunk.append(p)
                 chunk_len += len(p) + 2
             if chunk:
-                await update.message.reply_text("\n\n".join(chunk))
+                chunks.append("\n\n".join(chunk))
+
+        sent = 0
+        for c in chunks:
+            try:
+                await update.message.reply_text(
+                    c, read_timeout=SEND_TIMEOUT, write_timeout=SEND_TIMEOUT, connect_timeout=SEND_TIMEOUT
+                )
+                sent += 1
+            except Exception as e:
+                logger.error(f"[food_log_status] chunk {sent + 1}/{len(chunks)} send failed: {e}")
+                break
+        if sent < len(chunks):
+            try:
+                await update.message.reply_text(
+                    f"⚠️ 網絡逾時，只送出咗 {sent}/{len(chunks)} 部分——請再問一次。\n"
+                    f"Network timeout — only {sent}/{len(chunks)} parts sent. Please ask again."
+                )
+            except Exception:
+                pass
 
     else:
         user_id = str(update.effective_user.id)

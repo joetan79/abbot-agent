@@ -371,10 +371,16 @@ def _recent_pattern_context(days: int = 3) -> str:
         for k, v in levels.items():
             if k in per_indicator and v in per_indicator[k]:
                 per_indicator[k][v] += 1
+    # Include an indicator whenever it has ANY data (high, moderate, OR a
+    # clean all-low run) — not just when something's concerning. Omitting
+    # all-low streaks meant the model could never praise "sodium's been
+    # fine for days" (gout_diet.md's symmetric-praise rule) since that fact
+    # was invisible to it; only surfacing bad news isn't a real advisor.
     lines = []
     for k in LEVELS_KEYS:
         c = per_indicator[k]
-        if c["high"] or c["moderate"]:
+        total = c["high"] + c["moderate"] + c["low"]
+        if total > 0:
             lines.append(f"{_INDICATOR_LABEL[k]}: {c['high']} high, {c['moderate']} moderate, {c['low']} low")
     if not lines:
         return ""
@@ -539,7 +545,47 @@ async def send_weekly_report(bot) -> None:
         max_tokens=1500,
         model=MODEL_SMART,
     )
-    await bot.send_message(chat_id=OWNER_CHAT_ID, text=f"🩺 每週飲食記錄報告 | Weekly Food Log Report\n\n{report}")
+    # Chunked + long-timeout send — a full weekly report can exceed both
+    # Telegram's 4096-char hard cap and python-telegram-bot's 5s default
+    # network timeout, which previously surfaced as a silent partial/failed
+    # send with no error shown to Joe. Same fix as food_log_status's chunking
+    # in modules/agent.py — see that comment for the bug this avoids.
+    full_text = f"🩺 每週飲食記錄報告 | Weekly Food Log Report\n\n{report}"
+    TELEGRAM_MSG_LIMIT = 3500
+    SEND_TIMEOUT = 20.0
+    if len(full_text) <= TELEGRAM_MSG_LIMIT:
+        chunks = [full_text]
+    else:
+        chunks = []
+        chunk, chunk_len = [], 0
+        for p in full_text.split("\n\n"):
+            if chunk and chunk_len + len(p) + 2 > TELEGRAM_MSG_LIMIT:
+                chunks.append("\n\n".join(chunk))
+                chunk, chunk_len = [], 0
+            chunk.append(p)
+            chunk_len += len(p) + 2
+        if chunk:
+            chunks.append("\n\n".join(chunk))
+
+    sent = 0
+    for c in chunks:
+        try:
+            await bot.send_message(
+                chat_id=OWNER_CHAT_ID, text=c,
+                read_timeout=SEND_TIMEOUT, write_timeout=SEND_TIMEOUT, connect_timeout=SEND_TIMEOUT,
+            )
+            sent += 1
+        except Exception as e:
+            logger.error(f"[Gout] weekly report chunk {sent + 1}/{len(chunks)} send failed: {e}")
+            break
+    if sent < len(chunks):
+        try:
+            await bot.send_message(
+                chat_id=OWNER_CHAT_ID,
+                text=f"⚠️ 網絡逾時，週報只送出咗 {sent}/{len(chunks)} 部分。\nNetwork timeout — only {sent}/{len(chunks)} parts of the weekly report sent.",
+            )
+        except Exception:
+            pass
 
     # Clear exactly the entries this report covered — not a blanket wipe — so
     # any meal logged concurrently while the report was being generated survives.
