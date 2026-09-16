@@ -504,7 +504,9 @@ def analyze_meal_text(description: str) -> str:
 async def send_weekly_report(bot) -> None:
     """Compiles the last 7 days of logged meals into a pattern report, sends
     it to Joe privately, then CLEARS those entries — each week's report
-    starts from a fresh diary rather than accumulating forever. Registered
+    starts from a fresh diary rather than accumulating forever. Entries are
+    only cleared once every chunk of the report is confirmed sent; a failed
+    or partial send leaves them in place for the next run to retry. Registered
     as the "gout_weekly_report" action in run_scheduled_job (modules/agent.py),
     scheduled Monday mornings."""
     from modules.utils import ask_claude, OWNER_CHAT_ID, MODEL_SMART
@@ -539,9 +541,11 @@ async def send_weekly_report(bot) -> None:
     report = ask_claude(
         system,
         f"Here are Joe's {len(entries)} logged meals from the past 7 days:\n\n{log_text}\n\n"
-        "Write his weekly report (uric acid first and most detailed, then brief "
-        "calories/heart/weight patterns) per the Weekly report rules above. Write it "
-        "bilingually per communication_style.md.",
+        "Write his weekly report per the Weekly report rules above: a condensed "
+        "pattern summary, not a meal-by-meal itemized list — lead with the uric "
+        "acid/purine pattern (most detailed), then cover blood sugar, heart/"
+        "cholesterol, blood pressure, and weight/obesity patterns from the week. "
+        "Write it bilingually per communication_style.md.",
         max_tokens=1500,
         model=MODEL_SMART,
     )
@@ -583,9 +587,18 @@ async def send_weekly_report(bot) -> None:
             await bot.send_message(
                 chat_id=OWNER_CHAT_ID,
                 text=f"⚠️ 網絡逾時，週報只送出咗 {sent}/{len(chunks)} 部分。\nNetwork timeout — only {sent}/{len(chunks)} parts of the weekly report sent.",
+                read_timeout=SEND_TIMEOUT, write_timeout=SEND_TIMEOUT, connect_timeout=SEND_TIMEOUT,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"[Gout] weekly report failure notice also failed to send: {e}")
+        # Delivery failed (partially or fully) — leave this week's entries in
+        # place so the next run (or a manual retry) can still report on them,
+        # instead of silently losing data nobody actually received.
+        logger.warning(
+            f"[Gout] weekly report only sent {sent}/{len(chunks)} chunks — "
+            "keeping this week's entries uncleared for retry"
+        )
+        return
 
     # Clear exactly the entries this report covered — not a blanket wipe — so
     # any meal logged concurrently while the report was being generated survives.

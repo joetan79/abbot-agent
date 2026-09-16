@@ -547,6 +547,23 @@ async def _process_photo_batch(bot, chat_id: int, photos: list, caption: str, is
         sent = await bot.send_message(chat_id=chat_id, text=f"🖼 {reply}")
         photo_cache_set(sent.message_id, photo[-1].file_id)
 
+        # Log interaction for daily family digest — photo replies (e.g.
+        # Isaac's homework photos) previously never reached log_interaction,
+        # so the digest always saw "no interactions" even on days he was
+        # actively using the bot. See modules/insights.py / route_message's
+        # matching call for text messages.
+        if not is_owner_sender:
+            try:
+                from modules.insights import log_interaction
+                sender_name = (
+                    reply_msg.from_user.first_name
+                    or reply_msg.from_user.username
+                    or "Someone"
+                ) if reply_msg.from_user else "Someone"
+                log_interaction(sender_name, caption or "[photo]", reply)
+            except Exception:
+                pass
+
 async def cmd_clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear conversation history for fresh start."""
     if not is_owner(update.effective_user.id if update.effective_user else 0): return
@@ -897,12 +914,19 @@ async def main():
         replace_existing=True,
         next_run_time=datetime.now(timezone.utc),
     )
-    from modules.insights import send_daily_digest
+    from modules.insights import send_daily_digest, send_weekly_family_digest
     scheduler.add_job(
         send_daily_digest,
         CronTrigger(hour=23, minute=0),
         args=[app.bot],
         id="family_daily_digest",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        send_weekly_family_digest,
+        CronTrigger(day_of_week="mon", hour=11, minute=0),
+        args=[app.bot],
+        id="family_weekly_digest",
         replace_existing=True,
     )
     scheduler.start()
