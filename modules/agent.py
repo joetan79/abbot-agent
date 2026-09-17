@@ -550,9 +550,22 @@ photo meals are handled separately by caption keyword, not through this classifi
   Examples: "log dinner: beef noodles and a beer", "I had sardines and spinach for lunch",
   "食咗蜆同啤酒" (only trigger this when the message is clearly describing food eaten,
   not general chat about food)
-- "food_report": user wants to see their gout/uric acid weekly report/pattern now
-  (instead of waiting for the scheduled Monday report).
-  Examples: "show my uric acid report", "gout report this week", "how's my diet been"
+- "food_report": user wants to see their gout/uric acid OFFICIAL WEEKLY report now
+  (instead of waiting for the scheduled Monday report). This runs the same report
+  that clears the week's logged entries afterwards — only use it when they clearly
+  mean the recurring weekly report, not a same-day question.
+  Examples: "show my uric acid report", "gout report this week", "run my weekly food report"
+- "food_summary": user wants a SYNTHESISED, condensed overview/summary of their
+  diet for a specific day (today/yesterday/a named day) — NOT the raw log listing
+  (that's food_log_status) and NOT the official weekly report (that's food_report,
+  and it clears the week's data — don't use it for a same-day question). Trigger
+  this for "概括"/"總結"/"整體"/"點呀"/"how am I doing"/"overall"/"how's my diet
+  been today"/asking specifically about one indicator (sodium/blood sugar/purine/
+  etc.) "today" or "so far today" — i.e. they want an assessment, not a printout.
+  Extract the day into "action": "today" (default), "yesterday", "week", a weekday
+  name, or an explicit date. Does NOT clear any data — safe to ask anytime.
+  Examples: "概括今天的飲食", "今天整體點，鈉嘅吸取如何" (extract 今天/today → "today"),
+  "how's my diet been today", "總結一下今日食咗咩", "呢個星期食得點呀" → action "week"
 - "food_log_delete": user wants to remove/undo a food log entry (e.g. they logged
   something by mistake, or hadn't actually eaten it yet). Extract any identifying
   detail (food name) into "action" — leave "action" empty/null to mean "remove the
@@ -569,10 +582,13 @@ photo meals are handled separately by caption keyword, not through this classifi
   Examples: "補充：不是豬雜，只是燒肉", "actually it's just roast pork, no organ meat",
   "no it wasn't beef, it was pork"
 - "food_log_status": user asks what's currently logged for a given day (a plain
-  factual listing, NOT the weekly pattern report — that's food_report). ONLY use
+  factual listing of the raw stored entries — NOT a synthesised summary, that's
+  food_summary; NOT the weekly pattern report, that's food_report). ONLY use
   this when the message EXPLICITLY says it's about food/meals/diet — e.g. contains
   "food log", "飲食記錄", "餐記錄", "dinner log", "lunch log", "meal log", "尿酸記錄",
   or clearly names a meal (breakfast/lunch/dinner/早餐/午餐/晚餐) together with "log"/"記錄".
+  If instead they want an assessment/overview ("整體點"/"概括"/"總結"/"how am I doing")
+  rather than a listing, use food_summary instead, even if a meal is named.
   A BARE "what's my log" / "show me the log" / "log係咩" with NO food/meal/diet
   qualifier is AMBIGUOUS — there may be other kinds of logs (e.g. schedules, tasks)
   — use "chat" instead so ABbot asks which log they mean, rather than assuming food.
@@ -592,6 +608,10 @@ GOUT EXAMPLES:
 "I had sardines and spinach for lunch" → {"intent":"food_log","action":"sardines and spinach for lunch"}
 "show my uric acid report" → {"intent":"food_report"}
 "gout report this week" → {"intent":"food_report"}
+"概括今天的飲食" → {"intent":"food_summary","action":"today"}
+"那我今天整天早，午和晚餐的整體如何，鈉的吸取如何？" → {"intent":"food_summary","action":"today"}
+"how's my diet been today" → {"intent":"food_summary","action":"today"}
+"呢個星期食得點呀" → {"intent":"food_summary","action":"week"}
 "這我還沒有吃，可以移除記錄" → {"intent":"food_log_delete","action":null}
 "delete the omelet food log" → {"intent":"food_log_delete","action":"omelet"}
 "補充：不是豬雜，只是燒肉" → {"intent":"food_log_correct","action":"不是豬雜，只是燒肉"}
@@ -636,7 +656,7 @@ QUIZ TOPIC EXAMPLES:
 
 Return JSON:
 {
-  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, gcal_modify, gcal_remind, plan_today, morning_briefing, episodic_memory, report_list, food_log, food_report, food_log_delete, food_log_correct, food_log_status, chat],
+  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, gcal_modify, gcal_remind, plan_today, morning_briefing, episodic_memory, report_list, food_log, food_report, food_summary, food_log_delete, food_log_correct, food_log_status, chat],
   "time": "HH:MM" or null,
   "frequency": "daily" or "weekly" or "once" or null,
   "day": day of week or null,
@@ -3359,6 +3379,49 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await send_weekly_report(context.bot)
         if update.message.chat.type != "private":
             await update.message.reply_text("🩺 已將尿酸報告發送到我哋嘅私人對話。\nSent your uric acid report to our private chat.")
+
+    elif intent == "food_summary":
+        from modules.gout_tracker import get_pattern_summary
+        await update.message.chat.send_action("typing")
+        day_ref = (intent_data.get("action") or "today").strip()
+        text = get_pattern_summary(day_ref)
+        # Same chunking + long-timeout send as food_log_status below — a
+        # bilingual pattern summary across several meals can still exceed
+        # Telegram's 4096-char cap and the 5s default network timeout.
+        TELEGRAM_MSG_LIMIT = 3500
+        SEND_TIMEOUT = 20.0
+        if len(text) <= TELEGRAM_MSG_LIMIT:
+            chunks = [text]
+        else:
+            chunks = []
+            chunk, chunk_len = [], 0
+            for p in text.split("\n\n"):
+                if chunk and chunk_len + len(p) + 2 > TELEGRAM_MSG_LIMIT:
+                    chunks.append("\n\n".join(chunk))
+                    chunk, chunk_len = [], 0
+                chunk.append(p)
+                chunk_len += len(p) + 2
+            if chunk:
+                chunks.append("\n\n".join(chunk))
+
+        sent = 0
+        for c in chunks:
+            try:
+                await update.message.reply_text(
+                    c, read_timeout=SEND_TIMEOUT, write_timeout=SEND_TIMEOUT, connect_timeout=SEND_TIMEOUT
+                )
+                sent += 1
+            except Exception as e:
+                logger.error(f"[food_summary] chunk {sent + 1}/{len(chunks)} send failed: {e}")
+                break
+        if sent < len(chunks):
+            try:
+                await update.message.reply_text(
+                    f"⚠️ 網絡逾時，只送出咗 {sent}/{len(chunks)} 部分——請再問一次。\n"
+                    f"Network timeout — only {sent}/{len(chunks)} parts sent. Please ask again."
+                )
+            except Exception:
+                pass
 
     elif intent == "food_log_delete":
         from modules.gout_tracker import remove_entry

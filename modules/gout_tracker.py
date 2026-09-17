@@ -220,7 +220,7 @@ def correct_last_entry(correction_text: str) -> str:
         "names Joe used, prefixed exactly with 'SUMMARY: ' — e.g. "
         "'SUMMARY: 苦瓜湯、燒豬肉、白飯、3隻蛋'."
     )
-    raw = ask_claude(system, prompt, max_tokens=900, model=MODEL_SMART)
+    raw = ask_claude(system, prompt, max_tokens=1400, model=MODEL_SMART)
 
     # Strip LEVELS first (it can land before or after SUMMARY depending on
     # how closely the model follows "after the LEVELS tag" above — the line-
@@ -262,28 +262,14 @@ _LEVEL_LABEL = {
 _DOW_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
 
-def get_log_summary(day_ref: str = "today") -> str:
-    """Everything actually logged for a given day (or the past week), read
-    straight from the log file — used to answer "what's my log today/
-    yesterday/this week" honestly instead of letting the general chat
-    fallback improvise an answer from stale conversation history (it has no
-    access to the real data at all, and will confidently fabricate a "no
-    records" table rather than admit it can't check — see chat 2026-09-12).
-
-    Entries persist until the NEXT weekly report fires (send_weekly_report
-    clears only what it just reported on) — so "yesterday" or "this week"
-    are valid, real queries right up until Monday's report, not just "today".
+def _entries_for_day_ref(day_ref: str):
+    """Shared date-matching for get_log_summary and get_pattern_summary.
 
     day_ref: "today"/"yesterday" (also 今日/今天/昨日/昨天), a weekday name
     ("monday".."sunday", matching the most recent past occurrence — "today"
     if today IS that weekday), "week"/"this week" (也支援 本週/呢個星期,
     past 7 days), or an explicit "YYYY-MM-DD" date. Unrecognised input falls
-    back to "today".
-
-    Shows each entry's FULL stored analysis (purine/calories/heart/weight +
-    suggestions) — the same detail already shown when the meal was logged —
-    not just a bare one-line food list, since that fuller breakdown is the
-    actual point of checking the log."""
+    back to "today". Returns (matches, label)."""
     log = _load_log()
     now = datetime.now()
     ref = (day_ref or "today").strip().lower()
@@ -309,19 +295,77 @@ def get_log_summary(day_ref: str = "today") -> str:
         matches = [e for e in log.values() if e["timestamp"].startswith(date_str)]
         label = date_str
 
+    matches.sort(key=lambda e: e["timestamp"])
+    return matches, label
+
+
+def get_log_summary(day_ref: str = "today") -> str:
+    """Everything actually logged for a given day (or the past week), read
+    straight from the log file — used to answer "what's my log today/
+    yesterday/this week" honestly instead of letting the general chat
+    fallback improvise an answer from stale conversation history (it has no
+    access to the real data at all, and will confidently fabricate a "no
+    records" table rather than admit it can't check — see chat 2026-09-12).
+
+    Entries persist until the NEXT weekly report fires (send_weekly_report
+    clears only what it just reported on) — so "yesterday" or "this week"
+    are valid, real queries right up until Monday's report, not just "today".
+
+    Shows each entry's FULL stored analysis (purine/calories/heart/weight +
+    suggestions) — the same detail already shown when the meal was logged —
+    not just a bare one-line food list, since that fuller breakdown is the
+    actual point of checking the log. For a condensed, synthesised overview
+    instead of this raw per-meal dump, see get_pattern_summary."""
+    matches, label = _entries_for_day_ref(day_ref)
+
     if not matches:
         return (
             f"{label} 冇任何記錄（可能已經隨住週報清咗，或者嗰日冇記錄）。\n"
             f"No entries for {label} (may already have been cleared by a weekly report, or nothing was logged that day)."
         )
 
-    matches.sort(key=lambda e: e["timestamp"])
     blocks = [
         f"🕐 {e['timestamp'][11:16]} 整體 {_LEVEL_LABEL.get(e.get('level', 'unknown'), '⚪')} — {e['description']}\n\n{e['analysis']}"
         for e in matches
     ]
     header = f"{label} 飲食記錄 | Food log for {label}（共 {len(matches)} 餐 | {len(matches)} meal(s)）"
     return header + "\n\n" + "\n\n---\n\n".join(blocks)
+
+
+def get_pattern_summary(day_ref: str = "today") -> str:
+    """A condensed, SYNTHESISED overview for a given day (or week) — what
+    Joe actually means by "概括/總結" (summarize) his diet, as opposed to
+    get_log_summary's raw per-meal dump. Unlike send_weekly_report, this is
+    a read-only query: it never clears any entries, so it's safe to call
+    on-demand (e.g. "今天嘅飲食點呀", "概括今日飲食") without disturbing
+    the data the real Monday weekly report (or a "week" food_report request)
+    still needs to cover."""
+    from modules.utils import ask_claude, MODEL_SMART
+    from modules.skills_loader import load_skills
+
+    matches, label = _entries_for_day_ref(day_ref)
+    if not matches:
+        return (
+            f"{label} 冇任何記錄。\n"
+            f"No entries for {label}."
+        )
+
+    lines = [f"[{e['timestamp'][11:16]}] {e['description']}: {e['analysis'][:600]}" for e in matches]
+    log_text = "\n\n".join(lines)
+
+    system = load_skills(scope="gout")
+    report = ask_claude(
+        system,
+        f"Here are Joe's {len(matches)} logged meals for {label}:\n\n{log_text}\n\n"
+        "Write a condensed pattern summary (not a meal-by-meal itemized list) "
+        "covering uric acid/purine first (most detailed), then blood sugar, "
+        "heart/cholesterol, blood pressure, and weight/obesity patterns across "
+        "what's logged here. End with 1-2 concrete suggestions if there's "
+        "something worth flagging. Write it bilingually per communication_style.md.",
+        max_tokens=900,
+        model=MODEL_SMART,
+    )
+    return f"🩺 {label} 飲食總結 | Diet Summary\n\n{report}"
 
 
 def get_today_summary() -> str:
@@ -437,7 +481,7 @@ async def _vision_analyze_ids(bot, file_ids: list, caption: str, will_log: bool)
 
     r = claude.messages.create(
         model=MODEL_SMART,
-        max_tokens=900,
+        max_tokens=1400,
         system=load_skills(scope="gout"),
         messages=[{"role": "user", "content": content}],
     )
@@ -495,7 +539,7 @@ def analyze_meal_text(description: str) -> str:
         "Identify the food and rate its purine load per the rules above."
         + (f"\n\n{recent_ctx}" if recent_ctx else "")
     )
-    analysis = ask_claude(system, prompt, max_tokens=900, model=MODEL_SMART)
+    analysis = ask_claude(system, prompt, max_tokens=1400, model=MODEL_SMART)
     display_text = _add_entry("text", description, analysis)
     _record_history(f"[Logged a meal] {description}", display_text)
     return display_text
