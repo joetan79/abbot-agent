@@ -3,6 +3,7 @@ management. Private feature: photo/text meal logs + a weekly pattern report,
 sent only to OWNER_CHAT_ID, never the family group. See skills/gout_diet.md
 for the purine reference and report rules Claude follows."""
 
+import asyncio
 import logging
 import re
 import uuid
@@ -582,7 +583,17 @@ async def send_weekly_report(bot) -> None:
     log_text = "\n\n".join(lines)
 
     system = load_skills(scope="gout")
-    report = ask_claude(
+    # ask_claude is a blocking call (its retry backoff uses time.sleep, not
+    # asyncio.sleep) — run it in a thread so a slow generation over a big
+    # week of meals doesn't freeze the bot's entire event loop for minutes.
+    # A frozen loop was why the Telegram send below ALSO timed out right
+    # after: Telegram polling and every other scheduled job piled up behind
+    # the block, and the send got starved once it finally ran. A longer
+    # per-call timeout also gives a large multi-meal week room to finish
+    # instead of retrying 3x at the default 30s. See chat 2026-09-14/09-21 —
+    # the weekly report failed both weeks with the same 3x-timeout pattern.
+    report = await asyncio.to_thread(
+        ask_claude,
         system,
         f"Here are Joe's {len(entries)} logged meals from the past 7 days:\n\n{log_text}\n\n"
         "Write his weekly report per the Weekly report rules above: a condensed "
@@ -592,6 +603,7 @@ async def send_weekly_report(bot) -> None:
         "Write it bilingually per communication_style.md.",
         max_tokens=1500,
         model=MODEL_SMART,
+        timeout=60.0,
     )
     # Chunked + long-timeout send — a full weekly report can exceed both
     # Telegram's 4096-char hard cap and python-telegram-bot's 5s default

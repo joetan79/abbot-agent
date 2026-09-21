@@ -1,6 +1,7 @@
 """Cross-chat insights: log family member interactions, send daily + weekly
 digests to Joe."""
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
@@ -145,12 +146,20 @@ async def send_weekly_family_digest(bot):
     )
 
     try:
-        report = ask_claude(
+        # Run in a thread + longer timeout — same fix as gout_tracker's
+        # send_weekly_report: ask_claude's retry backoff blocks the event
+        # loop with time.sleep, and a big week of interactions can run past
+        # the default 30s, freezing Telegram polling and every other
+        # scheduled job until it gives up (which then made the send below
+        # time out too, on an otherwise-fine connection).
+        report = await asyncio.to_thread(
+            ask_claude,
             "You are a helpful family assistant summarising children's "
             "learning activity and interactions with the household AI assistant.",
             prompt,
             max_tokens=900,
             model=MODEL_SMART,
+            timeout=60.0,
         )
     except Exception as e:
         logger.error(f"[Insights] Weekly digest generation failed: {e}")

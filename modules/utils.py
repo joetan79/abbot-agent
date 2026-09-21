@@ -175,7 +175,7 @@ def get_and_reset_api_fails() -> dict[str, int]:
 
 
 def ask_claude(system: str, user_msg: str, max_tokens: int = 1500,
-               model: str = None, max_retries: int = 2) -> str:
+               model: str = None, max_retries: int = 2, timeout: float = 30.0) -> str:
     if model is None:
         model = MODEL_FAST
     logger.info(f"Using model: {model} | task: {user_msg[:50]}")
@@ -186,7 +186,7 @@ def ask_claude(system: str, user_msg: str, max_tokens: int = 1500,
                 max_tokens=max_tokens,
                 system=system,
                 messages=[{"role": "user", "content": user_msg}],
-                timeout=30.0,
+                timeout=timeout,
             )
             return r.content[0].text
         except anthropic.APITimeoutError:

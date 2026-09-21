@@ -914,7 +914,7 @@ async def main():
         replace_existing=True,
         next_run_time=datetime.now(timezone.utc),
     )
-    from modules.insights import send_daily_digest, send_weekly_family_digest
+    from modules.insights import send_daily_digest
     scheduler.add_job(
         send_daily_digest,
         CronTrigger(hour=23, minute=0),
@@ -922,13 +922,11 @@ async def main():
         id="family_daily_digest",
         replace_existing=True,
     )
-    scheduler.add_job(
-        send_weekly_family_digest,
-        CronTrigger(day_of_week="mon", hour=11, minute=0),
-        args=[app.bot],
-        id="family_weekly_digest",
-        replace_existing=True,
-    )
+    # Weekly reports (family digest, gout food log) live in schedules.json /
+    # restore_schedules instead of being hardcoded here — see run_scheduled_job's
+    # "family_weekly_digest" and "gout_weekly_report" actions — so they're all
+    # visible/manageable via /schedules and the schedule_pause/resume intents,
+    # same as any other recurring report.
     scheduler.start()
     logger.info("⏰ Scheduler started")
     logger.info("[SCHEDULER] All registered jobs at startup:")
