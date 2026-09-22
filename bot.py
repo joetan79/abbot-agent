@@ -864,7 +864,27 @@ async def error_handler(
 
 async def main():
     global scheduler, application
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    # python-telegram-bot's built-in defaults (5s read/write/connect, 1s pool
+    # timeout, pool size 1) are too tight for this bot's normal load — a
+    # single slow reply/photo-analysis holding the one pooled connection was
+    # enough to make an unrelated, lightweight call like send_action("typing")
+    # fail with a bare "Timed out" a few seconds later (see chat 2026-09-22,
+    # 14:58 food_log_correct). This had been patched call-by-call in a few
+    # hot spots (gout_tracker's weekly report, food_log_status, photo replies)
+    # with explicit read_timeout=20.0 etc., but any call without that override
+    # — like this one — was still exposed. Raising the global defaults here
+    # covers every call, patched or not, instead of continuing to whack-a-mole
+    # individual call sites.
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .connect_timeout(20.0)
+        .read_timeout(20.0)
+        .write_timeout(20.0)
+        .pool_timeout(20.0)
+        .connection_pool_size(8)
+        .build()
+    )
     application = app
     scheduler = AsyncIOScheduler()
     app.bot_data["scheduler"] = scheduler

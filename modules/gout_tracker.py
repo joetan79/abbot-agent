@@ -187,7 +187,7 @@ def remove_entry(hint: str = "") -> str:
     return f"已移除：{target['description']}（記錄於 {logged_at}）\nRemoved: {target['description']} (logged {logged_at})"
 
 
-def correct_last_entry(correction_text: str) -> str:
+async def correct_last_entry(correction_text: str) -> str:
     """Re-analyzes the most recently logged meal in light of a correction Joe
     just gave (e.g. "not organ meat, just BBQ pork") and REPLACES that entry —
     rather than adding a new separate one. Without this, each correction in a
@@ -221,7 +221,8 @@ def correct_last_entry(correction_text: str) -> str:
         "names Joe used, prefixed exactly with 'SUMMARY: ' — e.g. "
         "'SUMMARY: 苦瓜湯、燒豬肉、白飯、3隻蛋'."
     )
-    raw = ask_claude(system, prompt, max_tokens=1400, model=MODEL_SMART)
+    # Threaded — see analyze_meal_text's comment for why.
+    raw = await asyncio.to_thread(ask_claude, system, prompt, max_tokens=1400, model=MODEL_SMART)
 
     # Strip LEVELS first (it can land before or after SUMMARY depending on
     # how closely the model follows "after the LEVELS tag" above — the line-
@@ -333,7 +334,7 @@ def get_log_summary(day_ref: str = "today") -> str:
     return header + "\n\n" + "\n\n---\n\n".join(blocks)
 
 
-def get_pattern_summary(day_ref: str = "today") -> str:
+async def get_pattern_summary(day_ref: str = "today") -> str:
     """A condensed, SYNTHESISED overview for a given day (or week) — what
     Joe actually means by "概括/總結" (summarize) his diet, as opposed to
     get_log_summary's raw per-meal dump. Unlike send_weekly_report, this is
@@ -355,7 +356,9 @@ def get_pattern_summary(day_ref: str = "today") -> str:
     log_text = "\n\n".join(lines)
 
     system = load_skills(scope="gout")
-    report = ask_claude(
+    # Threaded — see analyze_meal_text's comment for why.
+    report = await asyncio.to_thread(
+        ask_claude,
         system,
         f"Here are Joe's {len(matches)} logged meals for {label}:\n\n{log_text}\n\n"
         "Write a condensed pattern summary (not a meal-by-meal itemized list) "
@@ -452,7 +455,11 @@ async def _vision_analyze_ids(bot, file_ids: list, caption: str, will_log: bool)
     import httpx
 
     content = []
-    async with httpx.AsyncClient() as client:
+    # httpx.AsyncClient()'s default timeout is 5s total — plenty for a small
+    # Telegram photo on a good connection, but a single slow/larger download
+    # blew straight through it and surfaced as a bare "Timed out" with no
+    # retry, killing the whole meal log. See chat 2026-09-22.
+    async with httpx.AsyncClient(timeout=20.0) as client:
         for fid in file_ids:
             file = await bot.get_file(fid)
             response = await client.get(file.file_path)
@@ -480,11 +487,16 @@ async def _vision_analyze_ids(bot, file_ids: list, caption: str, will_log: bool)
     )
     content.append({"type": "text", "text": prompt})
 
-    r = claude.messages.create(
+    # Blocking SDK call — run in a thread so a slow vision response doesn't
+    # freeze the bot's whole event loop (same fix as send_weekly_report's
+    # ask_claude call; see that comment for what a frozen loop causes).
+    r = await asyncio.to_thread(
+        claude.messages.create,
         model=MODEL_SMART,
         max_tokens=1400,
         system=load_skills(scope="gout"),
         messages=[{"role": "user", "content": content}],
+        timeout=60.0,
     )
     return r.content[0].text
 
@@ -528,7 +540,7 @@ async def query_meal_photo(bot, photos, caption: str = "") -> str:
         return "Sorry, I couldn't analyse that meal photo. Please try again."
 
 
-def analyze_meal_text(description: str) -> str:
+async def analyze_meal_text(description: str) -> str:
     """Logs a text-described meal (no photo) and returns the reply text."""
     from modules.utils import ask_claude, MODEL_SMART
     from modules.skills_loader import load_skills
@@ -540,7 +552,9 @@ def analyze_meal_text(description: str) -> str:
         "Identify the food and rate its purine load per the rules above."
         + (f"\n\n{recent_ctx}" if recent_ctx else "")
     )
-    analysis = ask_claude(system, prompt, max_tokens=1400, model=MODEL_SMART)
+    # ask_claude blocks the event loop on its time.sleep retries — thread it
+    # off, same fix as send_weekly_report/_vision_analyze_ids.
+    analysis = await asyncio.to_thread(ask_claude, system, prompt, max_tokens=1400, model=MODEL_SMART)
     display_text = _add_entry("text", description, analysis)
     _record_history(f"[Logged a meal] {description}", display_text)
     return display_text

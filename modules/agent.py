@@ -2236,7 +2236,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if await _is_reply_related("What did you eat?", original_text):
             from modules.gout_tracker import analyze_meal_text
             await update.message.chat.send_action("typing")
-            _reply = analyze_meal_text(original_text)
+            _reply = await analyze_meal_text(original_text)
             await update.message.reply_text(f"🩺 {_reply}")
             return
         # else: unrelated — fall through to normal handling below
@@ -2246,7 +2246,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if await _is_reply_related("What should I correct about the last food log entry?", original_text):
             from modules.gout_tracker import correct_last_entry
             await update.message.chat.send_action("typing")
-            _reply = correct_last_entry(original_text)
+            _reply = await correct_last_entry(original_text)
             await update.message.reply_text(f"🩺 {_reply}")
             return
         # else: unrelated — fall through to normal handling below
@@ -3375,7 +3375,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         else:
             await update.message.chat.send_action("typing")
-            reply = analyze_meal_text(description)
+            reply = await analyze_meal_text(description)
             await update.message.reply_text(f"🩺 {reply}", read_timeout=20.0, write_timeout=20.0, connect_timeout=20.0)
 
     elif intent == "food_report":
@@ -3389,7 +3389,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         from modules.gout_tracker import get_pattern_summary
         await update.message.chat.send_action("typing")
         day_ref = (intent_data.get("action") or "today").strip()
-        text = get_pattern_summary(day_ref)
+        text = await get_pattern_summary(day_ref)
         # Same chunking + long-timeout send as food_log_status below — a
         # bilingual pattern summary across several meals can still exceed
         # Telegram's 4096-char cap and the 5s default network timeout.
@@ -3442,7 +3442,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("想更正最近嗰個記錄嘅咩？\nWhat should I correct about the last entry?")
         else:
             await update.message.chat.send_action("typing")
-            reply = correct_last_entry(correction)
+            reply = await correct_last_entry(correction)
             await update.message.reply_text(f"🩺 {reply}", read_timeout=20.0, write_timeout=20.0, connect_timeout=20.0)
 
     elif intent == "food_log_status":
