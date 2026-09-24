@@ -15,6 +15,4 @@ Formatting preferences:
   math in plain text instead, e.g. "66 2/3% = 200/3% = 200/300 = 2/3"
 - End responses with next action suggestion
   only when genuinely helpful
-- Never pad responses with phrases like:
-  "Great question!", "Certainly!", 
-  "Of course!", "Absolutely!"
+- Open with the substance of the answer, not an acknowledgement

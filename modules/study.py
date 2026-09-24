@@ -46,8 +46,7 @@ def _get_user_context(username: str) -> str:
         age_str = f", {age} years old" if age else ""
         level_str = f" ({level} school level)" if level else ""
         return (
-            f"IMPORTANT: The person messaging you RIGHT NOW is {name.upper()} "
-            f"— Joe's {role}{age_str}{level_str}. "
+            f"You are talking with {name}, Joe's {role}{age_str}{level_str}. "
             f"Address them as {name}, not as Joe or anyone else.\n\n"
             f"{_FAMILY_CONTEXT}\n\n"
             f"Respond in a friendly, age-appropriate way for {name}."

@@ -1,6 +1,6 @@
 """Shared helpers: Claude API, auth, persistent memory, tasks, schedules."""
 
-import os, json, re, logging, time
+import asyncio, os, json, re, logging, time
 from datetime import datetime
 from pathlib import Path
 import anthropic
@@ -125,34 +125,6 @@ def clean_response(text: str) -> str:
     text = re.sub(r'\*([^*]+)\*', r'\1', text)
     # Remove markdown headers ## text
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-    # Remove Claude thinking/searching phrases line by line
-    skip_phrases = [
-        "i'll search",
-        "i need to search",
-        "based on the search",
-        "i'm searching",
-        "let me search",
-        "i will search",
-        "search results i've",
-        "i'm unable to find",
-        "i cannot find",
-        "to get the specific",
-        "i recommend checking",
-        "these sources would",
-        "without access to real-time",
-        "here are the top",
-        "here are some",
-        "based on my",
-        "i recommend checking",
-    ]
-    lines = text.split('\n')
-    cleaned_lines = []
-    for line in lines:
-        line_lower = line.lower().strip()
-        if any(phrase in line_lower for phrase in skip_phrases):
-            continue
-        cleaned_lines.append(line)
-    text = '\n'.join(cleaned_lines)
     # Remove multiple spaces left behind
     text = re.sub(r' +', ' ', text)
     # Remove multiple newlines
@@ -175,7 +147,10 @@ def get_and_reset_api_fails() -> dict[str, int]:
 
 
 def ask_claude(system: str, user_msg: str, max_tokens: int = 1500,
-               model: str = None, max_retries: int = 2, timeout: float = 30.0) -> str:
+               model: str = None, max_retries: int = 2, timeout: float = 30.0,
+               schema: dict | None = None) -> str:
+    """schema: a JSON Schema for the reply. When set, structured outputs
+    guarantee the text is valid JSON matching it."""
     if model is None:
         model = MODEL_FAST
     logger.info(f"Using model: {model} | task: {user_msg[:50]}")
@@ -187,6 +162,8 @@ def ask_claude(system: str, user_msg: str, max_tokens: int = 1500,
                 system=system,
                 messages=[{"role": "user", "content": user_msg}],
                 timeout=timeout,
+                **({"output_config": {"format": {"type": "json_schema", "schema": schema}}}
+                   if schema else {}),
             )
             return r.content[0].text
         except anthropic.APITimeoutError:
@@ -444,12 +421,9 @@ def get_preferences_prompt() -> str:
     all_prefs = {**mem, **prefs}
     if not all_prefs:
         return ""
-    lines = ["CRITICAL PREFERENCES - ALWAYS FOLLOW THESE:"]
+    lines = ["Joe's saved preferences and facts. Apply the ones relevant to this request:"]
     for key, value in all_prefs.items():
         lines.append(f"  * {key}: {value}")
-    lines.append(
-        "These are permanent preferences. NEVER ignore them in any response."
-    )
     return "\n".join(lines)
 
 
@@ -691,42 +665,60 @@ def task_delete(tid: str) -> bool:
         return True
     return False
 
-async def handle_photo(bot, photo, caption: str = "") -> str:
-    """Download photo from Telegram and send to Claude for analysis."""
+async def handle_photo(bot, photos: list, caption: str = "") -> str:
+    """Download one or more Telegram photos and send them to Claude, together,
+    for analysis in a SINGLE vision call. `photos` is a list of Telegram
+    photo-size arrays — pass [msg.photo] for a lone photo, or one array per
+    photo when a Telegram album delivers several at once.
+
+    Previously this only ever took ONE photo, and bot.py's caller looped
+    "one reply per photo" for a multi-photo album — each photo got its own
+    independent, blind-to-the-others analysis. That silently breaks any task
+    that needs BOTH images together (e.g. a vocabulary list in one photo and
+    a fill-in-the-blank exercise in another) — from the listener's side it
+    looks like "the bot can only see the first photo", since neither
+    individual reply ever saw the other one. See chat 2026-09-24 (Isaac's
+    2-photo vocabulary homework)."""
     try:
         import base64
-        from .skills_loader import load_skills
-        # Get highest resolution photo
-        file = await bot.get_file(photo[-1].file_id)
-
-        # Download image bytes
         import httpx
-        async with httpx.AsyncClient() as client:
-            response = await client.get(file.file_path)
-            image_data = base64.standard_b64encode(response.content).decode("utf-8")
+        from .skills_loader import load_skills
 
-        # Send to Claude with vision
-        r = claude.messages.create(
+        content = []
+        # httpx.AsyncClient()'s default timeout is 5s total — too short for a
+        # slow/larger Telegram photo download; see gout_tracker.py's matching
+        # fix (2026-09-22) for the same bug on the food-log photo path.
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            for photo in photos:
+                file = await bot.get_file(photo[-1].file_id)
+                response = await client.get(file.file_path)
+                image_data = base64.standard_b64encode(response.content).decode("utf-8")
+                content.append({
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data},
+                })
+
+        multi_note = (
+            f" These {len(photos)} images were sent together — if they're parts of "
+            "the same task (e.g. a vocabulary/word list plus a fill-in-the-blank "
+            "exercise, or a multi-page question), use them together to answer "
+            "fully; if they're unrelated, address each one."
+            if len(photos) > 1 else ""
+        )
+        text = (caption if caption else "Please describe and analyse this image in detail.") + multi_note
+        content.append({"type": "text", "text": text})
+
+        # Blocking SDK call — run in a thread so a slow vision response
+        # doesn't freeze the bot's whole event loop (same fix applied
+        # throughout gout_tracker.py this session; see that module's
+        # comments for what a frozen loop causes).
+        r = await asyncio.to_thread(
+            claude.messages.create,
             model=MODEL_SMART,
             max_tokens=1500,
             system=load_skills(scope="study"),
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/jpeg",
-                            "data": image_data,
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": caption if caption else "Please describe and analyse this image in detail."
-                    }
-                ],
-            }],
+            messages=[{"role": "user", "content": content}],
+            timeout=60.0,
         )
         return r.content[0].text
     except Exception as e:
@@ -774,7 +766,7 @@ async def handle_photo_reanalysis(bot, file_id: str, user_question: str, scope: 
         import httpx
         from .skills_loader import load_skills
         file = await bot.get_file(file_id)
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=20.0) as client:
             response = await client.get(file.file_path)
             image_data = base64.standard_b64encode(response.content).decode("utf-8")
 
@@ -782,7 +774,8 @@ async def handle_photo_reanalysis(bot, file_id: str, user_question: str, scope: 
             f"The user has a follow-up about this image:\n\n{user_question}\n\n"
             "Please look at the image carefully and answer accurately."
         )
-        r = claude.messages.create(
+        r = await asyncio.to_thread(
+            claude.messages.create,
             model=MODEL_SMART,
             max_tokens=1500,
             system=load_skills(scope=scope),
@@ -800,6 +793,7 @@ async def handle_photo_reanalysis(bot, file_id: str, user_question: str, scope: 
                     {"type": "text", "text": prompt},
                 ],
             }],
+            timeout=60.0,
         )
         return r.content[0].text
     except Exception as e:
@@ -903,27 +897,33 @@ def auto_extract_memory(user_id: str, text: str):
     Auto extract and save memories from conversation.
     Uses categorized storage for better retrieval.
     """
-    system = """Extract personal facts or preferences from this message worth remembering long term.
-Return ONLY valid JSON array:
-[
-  {
-    "key": "meal_breakfast",
-    "value": "oats and banana at 7am",
-    "is_preference": true,
-    "importance": "high"
-  }
-]
+    system = """Extract personal facts or preferences from this message worth remembering long term,
+e.g. key "meal_breakfast", value "oats and banana at 7am".
 importance: "high" = must always follow
             "medium" = helpful context
             "low" = nice to know
-If nothing worth remembering return: []
-Only extract clear explicit facts.
-Do not extract questions or temporary info."""
+Only extract clear explicit facts; skip questions and temporary info.
+Return an empty facts list if nothing is worth remembering."""
+    schema = {
+        "type": "object",
+        "properties": {"facts": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string"},
+                "value": {"type": "string"},
+                "is_preference": {"type": "boolean"},
+                "importance": {"type": "string", "enum": ["high", "medium", "low"]},
+            },
+            "required": ["key", "value", "is_preference", "importance"],
+            "additionalProperties": False,
+        }}},
+        "required": ["facts"],
+        "additionalProperties": False,
+    }
     try:
-        raw = ask_claude(system, text, max_tokens=300, model=MODEL_FAST)
-        raw = raw.strip().strip("```json").strip("```").strip()
+        raw = ask_claude(system, text, max_tokens=300, model=MODEL_FAST, schema=schema)
         import json
-        facts = json.loads(raw)
+        facts = json.loads(raw)["facts"]
         for fact in facts:
             if "key" in fact and "value" in fact:
                 key = fact["key"]
@@ -998,6 +998,15 @@ def get_topic_preferences(topic: str) -> str:
     return "\n".join(lines)
 
 
+def _final_text(content) -> str:
+    """Text written after the last server-tool result. Drops the "Let me
+    search..." narration Claude writes between web searches."""
+    last_result = max((i for i, b in enumerate(content)
+                       if getattr(b, "type", "").endswith("_tool_result")), default=-1)
+    return "".join(b.text for b in content[last_result + 1:]
+                   if getattr(b, "type", "") == "text")
+
+
 def ask_claude_with_search(system: str, user_msg: str,
                             user_id: str = None, max_tokens: int = 1500,
                             model: str = None,
@@ -1030,37 +1039,21 @@ def ask_claude_with_search(system: str, user_msg: str,
         block_types = [getattr(b, "type", "?") for b in r.content]
         logger.info(f"Web search stop_reason={r.stop_reason} blocks={block_types}")
 
-        # If model requested tool use but didn't finish (shouldn't happen with server tool),
-        # make a follow-up call to get the final answer
-        if r.stop_reason == "tool_use":
-            tool_results = []
-            for block in r.content:
-                if hasattr(block, "type") and block.type == "tool_use":
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": "Search executed."
-                    })
-            if tool_results:
-                messages = messages + [
-                    {"role": "assistant", "content": r.content},
-                    {"role": "user", "content": tool_results},
-                ]
-                r = claude.messages.create(
-                    model=model,
-                    max_tokens=max_tokens,
-                    system=system,
-                    tools=[{"type": "web_search_20250305", "name": "web_search"}],
-                    messages=messages,
-                    timeout=90.0,
-                )
-                logger.info(f"Web search follow-up stop_reason={r.stop_reason}")
+        # A long server-side search loop can pause; re-send the paused turn
+        # and the server resumes where it stopped.
+        if r.stop_reason == "pause_turn":
+            messages = messages + [{"role": "assistant", "content": r.content}]
+            r = claude.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system,
+                tools=[{"type": "web_search_20250305", "name": "web_search"}],
+                messages=messages,
+                timeout=90.0,
+            )
+            logger.info(f"Web search resumed stop_reason={r.stop_reason}")
 
-        # Extract all text from response blocks
-        full_response = ""
-        for block in r.content:
-            if hasattr(block, "type") and block.type == "text":
-                full_response += block.text
+        full_response = _final_text(r.content)
 
         # Clean citation/HTML tags from response
         full_response = clean_response(full_response)
@@ -1193,11 +1186,7 @@ def ask_claude_news(system: str, user_msg: str, max_tokens: int = 1500) -> str:
             }],
             messages=[{"role": "user", "content": user_msg}],
         )
-        full_response = ""
-        for block in r.content:
-            if hasattr(block, "type") and block.type == "text":
-                full_response += block.text
-        full_response = clean_response(full_response)
+        full_response = clean_response(_final_text(r.content))
         return full_response or "Could not retrieve news."
     except Exception as e:
         logger.error(f"News fetch error: {e}")

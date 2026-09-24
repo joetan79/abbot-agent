@@ -493,6 +493,22 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
 _media_group_buffer: dict = {}
 _MEDIA_GROUP_WAIT_SECONDS = 2.5  # generous margin over how long Telegram typically takes to deliver every photo in an album
 
+# Telegram's media_group_id only catches photos sent together in one
+# multi-select — it does NOT cover someone sending single photos one at a
+# time across several messages, which is exactly how a multi-part task (a
+# vocabulary list, then separately the fill-in-the-blank exercise) often
+# actually arrives. Without this, each single photo only ever gets analysed
+# alone, which looks like "the bot can only see one photo" to the sender —
+# see chat 2026-09-24 (Isaac's vocabulary homework, sent as 2 separate
+# single-photo messages ~1-2 minutes apart, not one album). Keyed by
+# (chat_id, sender_id): a new single (non-grouped) generic photo within the
+# window gets combined with whatever was recently sent, not just analysed
+# on its own — accepting the trade-off that two genuinely unrelated photos
+# sent back-to-back may get wrongly combined too (Joe's call, 2026-09-24).
+_recent_photo_context: dict = {}
+_RECENT_PHOTO_WINDOW = timedelta(minutes=5)
+_MAX_COMBINED_PHOTOS = 6
+
 
 async def _flush_media_group(group_id: str, bot) -> None:
     await asyncio.sleep(_MEDIA_GROUP_WAIT_SECONDS)
@@ -541,28 +557,46 @@ async def _process_photo_batch(bot, chat_id: int, photos: list, caption: str, is
         photo_cache_set(sent.message_id, fid, scope="gout")
         return
 
-    # Generic (non-food) — unchanged: one reply per photo.
-    for photo in photos:
-        reply = await handle_photo(bot, photo, caption)
-        sent = await bot.send_message(chat_id=chat_id, text=f"🖼 {reply}")
-        photo_cache_set(sent.message_id, photo[-1].file_id)
+    # Generic (non-food) — ALL photos from this batch go into ONE combined
+    # reply, not one reply per photo. A multi-photo album is very often one
+    # task split across images (a vocabulary list + a fill-in-the-blank
+    # exercise, a multi-page question) that can't be solved correctly if
+    # each photo is only ever analysed alone — see handle_photo's docstring.
+    #
+    # Also fold in any single (non-grouped) photo(s) this same sender sent
+    # within the window — see _recent_photo_context's comment above.
+    sender_id = reply_msg.from_user.id if reply_msg.from_user else 0
+    ctx_key = (chat_id, sender_id)
+    now = datetime.now(timezone.utc)
+    prev = _recent_photo_context.get(ctx_key)
+    if prev and (now - prev["ts"]) <= _RECENT_PHOTO_WINDOW:
+        combined_photos = (prev["photos"] + photos)[-_MAX_COMBINED_PHOTOS:]
+        combined_caption = "\n".join(c for c in [prev["caption"], caption] if c)
+    else:
+        combined_photos = photos
+        combined_caption = caption
+    _recent_photo_context[ctx_key] = {"photos": combined_photos, "caption": combined_caption, "ts": now}
 
-        # Log interaction for daily family digest — photo replies (e.g.
-        # Isaac's homework photos) previously never reached log_interaction,
-        # so the digest always saw "no interactions" even on days he was
-        # actively using the bot. See modules/insights.py / route_message's
-        # matching call for text messages.
-        if not is_owner_sender:
-            try:
-                from modules.insights import log_interaction
-                sender_name = (
-                    reply_msg.from_user.first_name
-                    or reply_msg.from_user.username
-                    or "Someone"
-                ) if reply_msg.from_user else "Someone"
-                log_interaction(sender_name, caption or "[photo]", reply)
-            except Exception:
-                pass
+    reply = await handle_photo(bot, combined_photos, combined_caption)
+    sent = await bot.send_message(chat_id=chat_id, text=f"🖼 {reply}")
+    photo_cache_set(sent.message_id, combined_photos[0][-1].file_id)
+
+    # Log interaction for daily family digest — photo replies (e.g.
+    # Isaac's homework photos) previously never reached log_interaction,
+    # so the digest always saw "no interactions" even on days he was
+    # actively using the bot. See modules/insights.py / route_message's
+    # matching call for text messages.
+    if not is_owner_sender:
+        try:
+            from modules.insights import log_interaction
+            sender_name = (
+                reply_msg.from_user.first_name
+                or reply_msg.from_user.username
+                or "Someone"
+            ) if reply_msg.from_user else "Someone"
+            log_interaction(sender_name, combined_caption or "[photo]", reply)
+        except Exception:
+            pass
 
 async def cmd_clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear conversation history for fresh start."""

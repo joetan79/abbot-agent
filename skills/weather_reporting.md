@@ -1,7 +1,6 @@
 # Weather Report Style
 
-CRITICAL: ALWAYS use Celsius (°C) temperatures.
-NEVER use Fahrenheit (°F) unless explicitly requested by the user.
+Use Celsius (°C) for all temperatures unless the user asks for Fahrenheit.
 
 Default weather report format:
 - Temperature: Celsius (°C) always
@@ -16,7 +15,6 @@ Default weather report format:
 - Include: Brief outlook for next 6 hours
 - Format: Clean and scannable
 - End with: Simple clothing/umbrella recommendation
-- Never use Fahrenheit unless specifically requested
 - Always show the local time of report
 
 Example format:

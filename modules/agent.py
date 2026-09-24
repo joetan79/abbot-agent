@@ -166,7 +166,7 @@ def build_owner_system_prompt(user_id: str, text: str = "") -> str:
         for jid, j in list(schedules.items())[:8]
     ) or "No active schedules"
 
-    return f"""CRITICAL: You are speaking with JOE — the owner of this bot. The person messaging you RIGHT NOW is Joe. Never call him Isaac, Arik, or any other name. Isaac and Arik are Joe's children — they are NOT in this conversation.
+    return f"""You are talking with Joe, the owner of this bot. Address him as Joe. Isaac and Arik are Joe's children and are not part of this conversation, so don't address him by their names.
 
 You are ABbot - professional AI agent.
 
@@ -191,13 +191,6 @@ ACTIVE SCHEDULES:
 
 RECENT CONVERSATION:
 {recent_history}
-
-LANGUAGE SUPPORT:
-- Respond in the same language the user writes in
-- If user writes in Chinese: respond in Traditional Chinese
-- If user writes in English: respond in English
-- Never mix languages in one response unless asked
-- For Chinese: always use Traditional Chinese characters
 
 RULES:
 - Use relevant memories to personalize responses
@@ -775,9 +768,8 @@ async def run_scheduled_job(bot, job_id: str, action: str):
 
         if weather_prefs_list:
             prefs_text = (
-                "USER WEATHER PREFERENCES (MUST follow exactly):\n" +
-                "\n".join(weather_prefs_list) +
-                "\nThese are mandatory requirements."
+                "User weather preferences (these override the report defaults):\n" +
+                "\n".join(weather_prefs_list)
             )
         else:
             prefs_text = (
@@ -790,15 +782,9 @@ async def run_scheduled_job(bot, job_id: str, action: str):
         system = (
             f"{weather_skill}\n\n"
             f"{prefs_text}\n\n"
-            f"CRITICAL RULES:\n"
-            f"- Use CELSIUS (°C) ONLY unless user specifically requested Fahrenheit\n"
-            f"- NEVER use Fahrenheit by default\n"
-            f"- Include: temperature high/low, feels like, humidity, dew point, "
-            f"wind speed km/h, rain chance, UV index\n"
-            f"- City: {city}\n"
-            f"- Date: {now}\n"
-            f"- Search for current live weather data\n"
-            f"- Format report clearly and concisely"
+            f"City: {city}\n"
+            f"Date: {now}\n"
+            f"Search for current live weather data."
         )
 
         search_query = (
@@ -1123,14 +1109,8 @@ an activity. Known activities: {activity_list}
 
 LANGUAGE: Support English and Chinese only.
 
-Return ONLY valid JSON:
-{{
-  "is_completion": true/false,
-  "activity": "activity name",
-  "activity_key": "key matching known activities",
-  "confidence": "high/medium/low",
-  "language": "english/chinese"
-}}
+Fields: is_completion, activity (activity name), activity_key (key matching
+known activities), confidence (high/medium/low), language (english/chinese).
 
 English completion examples:
 "finished dinner" → true, dinner, meal, high
@@ -1174,20 +1154,27 @@ NOT completions:
 "I want to exercise" → false
 "schedule dinner" → false
 "我想吃飯" → false (want to eat, not done)
-"我餓了" → false (hungry, not done)
+"我餓了" → false (hungry, not done)"""
 
-Return ONLY the JSON, no explanation."""
-
+    schema = {
+        "type": "object",
+        "properties": {
+            "is_completion": {"type": "boolean"},
+            "activity": {"type": "string"},
+            "activity_key": {"type": "string"},
+            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+            "language": {"type": "string", "enum": ["english", "chinese"]},
+        },
+        "required": ["is_completion", "activity", "activity_key", "confidence", "language"],
+        "additionalProperties": False,
+    }
     try:
         raw = ask_claude(
             system, text,
             max_tokens=150,
-            model=MODEL_FAST
+            model=MODEL_FAST,
+            schema=schema,
         )
-        raw = raw.strip()\
-                 .strip("```json")\
-                 .strip("```")\
-                 .strip()
         result = json.loads(raw)
         if result.get("is_completion") and \
            result.get("confidence") in \
@@ -1650,12 +1637,13 @@ async def _is_reply_related(prior_question: str, reply_text: str) -> bool:
     system = (
         f"The user was just asked: \"{prior_question}\"\n"
         "Does their reply below answer that question, or is it clearly an "
-        "unrelated new request / topic change? Return ONLY JSON: "
-        '{"related": true} or {"related": false}.'
+        "unrelated new request / topic change?"
     )
-    raw = ask_claude(system, reply_text, max_tokens=50, model=MODEL_FAST)
+    schema = {"type": "object", "properties": {"related": {"type": "boolean"}},
+              "required": ["related"], "additionalProperties": False}
+    raw = ask_claude(system, reply_text, max_tokens=50, model=MODEL_FAST, schema=schema)
     try:
-        result = json.loads(raw.strip().strip("```json").strip("```").strip())
+        result = json.loads(raw)
         return bool(result.get("related", True))
     except Exception:
         return True
@@ -2954,18 +2942,19 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if any(ind in text_lower for ind in [" and ", ", ", " & "]):
             extract_system = (
                 "Extract all city names from this weather request. "
-                "Return ONLY a JSON array of city name strings. "
-                "Example: [\"Tokyo\", \"London\", \"Kuala Lumpur\"] "
-                "Return [] if only one or zero cities."
+                "Return an empty list if only one or zero cities."
             )
+            cities_schema = {"type": "object",
+                             "properties": {"cities": {"type": "array", "items": {"type": "string"}}},
+                             "required": ["cities"], "additionalProperties": False}
             try:
                 raw = ask_claude(
                     extract_system, text,
                     max_tokens=100,
                     model=MODEL_FAST,
+                    schema=cities_schema,
                 )
-                raw = raw.strip().strip("```json").strip("```").strip()
-                cities_mentioned = json.loads(raw)
+                cities_mentioned = json.loads(raw)["cities"]
                 if not isinstance(cities_mentioned, list):
                     cities_mentioned = []
             except Exception:
@@ -2979,7 +2968,6 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 system = (
                     f"{weather_skill}\n\n"
                     f"{prefs_text}\n\n"
-                    f"CRITICAL: Use CELSIUS only.\n"
                     f"Brief weather for {city}. "
                     f"Keep concise — max 6 lines. "
                     f"Date/time: {now_str}."
@@ -3004,7 +2992,6 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             system = (
                 f"{weather_skill}\n\n"
                 f"{prefs_text}\n\n"
-                f"CRITICAL: Use CELSIUS (°C) ONLY. Never use Fahrenheit.\n"
                 f"You are ABbot weather reporter. "
                 f"Report weather for: {job_city}. "
                 f"Current date/time: {now_str}. "
