@@ -166,6 +166,20 @@ def build_owner_system_prompt(user_id: str, text: str = "") -> str:
         for jid, j in list(schedules.items())[:8]
     ) or "No active schedules"
 
+    # Integration status — without this the chat model had no idea Google
+    # Calendar was connected and repeatedly told Joe "I don't have calendar
+    # integration" right after he'd connected it (bot.log 2026-09-25 11:11/11:15).
+    try:
+        from modules.gcal import is_connected as _gcal_connected
+        gcal_status = "CONNECTED" if _gcal_connected() else "NOT connected (Joe can say 'connect google calendar')"
+    except Exception:
+        gcal_status = "unknown"
+    integrations_text = f"""YOUR INTEGRATIONS (these are real — never tell Joe you lack them):
+- Google Calendar: {gcal_status}. You can add, view and modify events. Adding works when Joe writes the
+  details ("add to calendar dentist tomorrow 3pm") or sends a photo/screenshot with a caption like
+  "add to calendar". If he asks to add something without details, ask for the title/date/time or the photo —
+  do NOT say you can't access his calendar."""
+
     return f"""You are talking with Joe, the owner of this bot. Address him as Joe. Isaac and Arik are Joe's children and are not part of this conversation, so don't address him by their names.
 
 You are ABbot - professional AI agent.
@@ -188,6 +202,8 @@ PENDING TASKS:
 
 ACTIVE SCHEDULES:
 {sched_text}
+
+{integrations_text}
 
 RECENT CONVERSATION:
 {recent_history}
@@ -1795,6 +1811,85 @@ async def _gcal_add_from_intent(intent_data: dict) -> str:
     return "❌ Failed to add event. Check calendar connection."
 
 
+_CALENDAR_WORDS = ("calendar", "gcal", "日曆", "日历", "行事曆", "行事历", "行程")
+_CALENDAR_ADD_WORDS = ("add", "put", "save", "insert", "book", "加", "入", "記", "记", "放")
+
+
+def is_calendar_add_text(text: str) -> bool:
+    """True when a photo caption (or a short follow-up to a photo) asks to
+    add something to the calendar — e.g. "add this into my calendar",
+    "加入我的行程". Photo captions never go through parse_intent, so without
+    this check a calendar-screenshot photo fell through to the generic
+    homework/vision reply and nothing was ever added. See bot.log
+    2026-09-25 11:14."""
+    t = (text or "").lower()
+    return any(w in t for w in _CALENDAR_WORDS) and any(w in t for w in _CALENDAR_ADD_WORDS)
+
+
+async def add_calendar_events_from_photos(bot, photos: list, caption: str) -> str:
+    """Reads event details out of one or more photos (a poster, schedule,
+    invitation, chat screenshot...) with a vision call and adds each event
+    via _gcal_add_from_intent — the same path the text "gcal_add" intent
+    uses. Returns the user-facing summary text (Markdown)."""
+    from modules.gcal import is_connected
+    from modules.utils import claude, photo_content_blocks
+    import pytz as _pytz
+
+    if not is_connected():
+        return "Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate."
+
+    today = datetime.now(_pytz.timezone("Asia/Macau"))
+    system = (
+        "Extract every calendar event shown in the image(s) so they can be added to Google Calendar.\n"
+        f"Today is {today.strftime('%A, %Y-%m-%d')}. If a date in the image has no year, use the next "
+        "upcoming occurrence of that date.\n"
+        "The user's caption may narrow which events to add or give extra details (title, color...) — follow it.\n"
+        "Return ONLY a JSON array (no markdown), one object per event:\n"
+        '{"action": short event title, "start_date": "YYYY-MM-DD", "time": "HH:MM" 24h start or null, '
+        '"end_time": "HH:MM" or null, "all_day": true only if the image clearly marks it all-day or gives no time at all, '
+        '"end_date": "YYYY-MM-DD" end of a recurring range or null, '
+        '"recur_days": list of weekday names if it repeats weekly or null, "color": color name if the user asked or null}\n'
+        "Include the location in the title if one is shown (e.g. \"Dentist @ Kiang Wu\"). "
+        "If there are no events at all, return []."
+    )
+    content = await photo_content_blocks(bot, photos)
+    content.append({"type": "text", "text": f"Caption: {caption or '(none)'}"})
+    # Threaded — a blocking SDK call here would freeze the whole event loop
+    # (see handle_photo / gout_tracker for that bug).
+    r = await asyncio.to_thread(
+        claude.messages.create,
+        model=MODEL_SMART,
+        max_tokens=1500,
+        system=system,
+        messages=[{"role": "user", "content": content}],
+        timeout=60.0,
+    )
+    raw = r.content[0].text.strip()
+    try:
+        events = json.loads(raw.strip("`").removeprefix("json").strip())
+    except Exception:
+        logger.error(f"[GCal] photo event extraction returned non-JSON: {raw[:300]!r}")
+        return "Sorry, I couldn't read the event details from that photo. Could you type them out (title, date, time)?"
+    if isinstance(events, dict):
+        events = [events]
+    events = [e for e in events if isinstance(e, dict)]
+    logger.info(f"[GCal] photo event extraction: {events}")
+    if not events:
+        return "I couldn't find any event (date/time) in that photo. Could you type the details instead?"
+
+    results = []
+    for ev in events:
+        missing = _gcal_missing_fields(ev)
+        if missing:
+            results.append(
+                f"⚠️ Not added — missing {', '.join(missing)}: {ev.get('action') or '(untitled)'} "
+                f"{ev.get('start_date') or ''}".rstrip()
+            )
+            continue
+        results.append(await _gcal_add_from_intent(ev))
+    return "\n\n".join(results)
+
+
 async def _gcal_modify_from_intent(intent_data: dict, context) -> dict:
     """Modifies a calendar event from a gcal_modify-shaped intent dict.
     Returns {"status": ..., "text": ...} — status is one of "not_connected",
@@ -3113,7 +3208,9 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         await update.message.reply_text(
             f"🔗 Visit this URL to authorize:\n\n{auth_url}\n\n"
-            "After approving, Google will show you a code — just paste it here directly."
+            "After approving, your browser will open a page that fails to load "
+            "(http://localhost/?...code=...). That's expected — copy the WHOLE address "
+            "from the address bar and paste it here."
         )
 
     elif intent == "gcal_auth_code":

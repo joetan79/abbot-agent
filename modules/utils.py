@@ -665,6 +665,27 @@ def task_delete(tid: str) -> bool:
         return True
     return False
 
+async def photo_content_blocks(bot, photos: list) -> list:
+    """Downloads Telegram photos into base64 image content blocks for a
+    Claude vision call. `photos` is a list of Telegram photo-size arrays."""
+    import base64
+    import httpx
+    blocks = []
+    # httpx.AsyncClient()'s default timeout is 5s total — too short for a
+    # slow/larger Telegram photo download; see gout_tracker.py's matching
+    # fix (2026-09-22) for the same bug on the food-log photo path.
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        for photo in photos:
+            file = await bot.get_file(photo[-1].file_id)
+            response = await client.get(file.file_path)
+            image_data = base64.standard_b64encode(response.content).decode("utf-8")
+            blocks.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data},
+            })
+    return blocks
+
+
 async def handle_photo(bot, photos: list, caption: str = "") -> str:
     """Download one or more Telegram photos and send them to Claude, together,
     for analysis in a SINGLE vision call. `photos` is a list of Telegram
@@ -680,23 +701,9 @@ async def handle_photo(bot, photos: list, caption: str = "") -> str:
     individual reply ever saw the other one. See chat 2026-09-24 (Isaac's
     2-photo vocabulary homework)."""
     try:
-        import base64
-        import httpx
         from .skills_loader import load_skills
 
-        content = []
-        # httpx.AsyncClient()'s default timeout is 5s total — too short for a
-        # slow/larger Telegram photo download; see gout_tracker.py's matching
-        # fix (2026-09-22) for the same bug on the food-log photo path.
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            for photo in photos:
-                file = await bot.get_file(photo[-1].file_id)
-                response = await client.get(file.file_path)
-                image_data = base64.standard_b64encode(response.content).decode("utf-8")
-                content.append({
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data},
-                })
+        content = await photo_content_blocks(bot, photos)
 
         multi_note = (
             f" These {len(photos)} images were sent together — if they're parts of "

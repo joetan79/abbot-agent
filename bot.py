@@ -30,6 +30,7 @@ from modules.agent import (
     cmd_memories, cmd_forget,
     handle_delete_last, fire_scheduled_deletion,
     fire_escalation,
+    is_calendar_add_text, add_calendar_events_from_photos,
 )
 
 logging.basicConfig(
@@ -174,6 +175,31 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             record_message(chat_id, sender_name, text)
 
         if is_owner(sender_id):
+            # Pasted Google OAuth redirect URL (http://localhost/?...code=...) —
+            # handled directly rather than trusting the intent classifier to
+            # pick the code out of a long URL.
+            from modules.gcal import extract_auth_code, complete_auth
+            if extract_auth_code(text):
+                ok = await asyncio.to_thread(complete_auth, text)
+                await msg.reply_text(
+                    "✅ Google Calendar connected!" if ok
+                    else "❌ Auth failed — say 'connect google calendar' to get a fresh link and try again."
+                )
+                return
+            # "add in my calendar" right after sending a photo, with no event
+            # details of its own (no digits) — the photo IS the details. Text
+            # messages can't see photos, so previously this got answered as
+            # chat with nothing to add (bot.log 2026-09-25 11:11).
+            recent = _recent_photo_context.get((chat_id, sender_id))
+            if (
+                recent
+                and is_calendar_add_text(text)
+                and not any(ch.isdigit() for ch in text)
+                and datetime.now(timezone.utc) - recent["ts"] <= _RECENT_PHOTO_WINDOW
+            ):
+                await msg.chat.send_action("typing")
+                await _reply_calendar_from_photos(context.bot, recent["photos"][-1:], text, msg)
+                return
             await handle_owner_message(update, context)
             return
 
@@ -519,6 +545,19 @@ async def _flush_media_group(group_id: str, bot) -> None:
     await _process_photo_batch(bot, entry["chat_id"], entry["photos"], entry["caption"], entry["is_owner_sender"], entry["reply_msg"])
 
 
+async def _reply_calendar_from_photos(bot, photos: list, caption: str, reply_msg) -> None:
+    try:
+        reply = await add_calendar_events_from_photos(bot, photos, caption)
+    except Exception as e:
+        logger.error(f"[GCal] add from photo failed: {e}")
+        reply = "❌ Sorry, something went wrong adding that to your calendar. Please try again."
+    try:
+        await reply_msg.reply_text(reply, parse_mode="Markdown")
+    except Exception:
+        # Titles with stray * / _ break Markdown parsing — resend plain.
+        await reply_msg.reply_text(reply)
+
+
 async def _process_photo_batch(bot, chat_id: int, photos: list, caption: str, is_owner_sender: bool, reply_msg) -> None:
     """Routes a collected batch of one or more same-meal photos. `reply_msg`
     is whichever Update.message we have handy to reply into (first photo of
@@ -528,6 +567,15 @@ async def _process_photo_batch(bot, chat_id: int, photos: list, caption: str, is
     # marks it as food (keeps it separate from homework/general photos on
     # this same handler). "ask"/"問" wins over the log keywords — e.g. "ask
     # food"/"問餐" answers without saving to the diary. See modules/gout_tracker.py.
+    # "add this to my calendar" photo (a poster, invitation, schedule
+    # screenshot) — checked before the food keywords so e.g. "add dinner
+    # with Tom to calendar" isn't logged as a meal. Without this, calendar
+    # photos fell into the generic vision reply below and nothing was added.
+    if is_owner_sender and is_calendar_add_text(caption):
+        logger.info(f"DEBUG photo batch caption={caption!r} n_photos={len(photos)} -> calendar")
+        await _reply_calendar_from_photos(bot, photos, caption, reply_msg)
+        return
+
     food_mode = None
     if is_owner_sender:
         if gout_tracker.is_food_query_caption(caption):
@@ -967,6 +1015,14 @@ async def main():
         id="group_health_check",
         replace_existing=True,
         next_run_time=datetime.now(timezone.utc),
+    )
+    from modules.gcal import run_daily_check as gcal_daily_check
+    scheduler.add_job(
+        gcal_daily_check,
+        CronTrigger(hour=8, minute=30),
+        args=[app.bot],
+        id="gcal_daily_check",
+        replace_existing=True,
     )
     from modules.insights import send_daily_digest
     scheduler.add_job(

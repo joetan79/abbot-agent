@@ -5,6 +5,7 @@ Auth flow is done via the Telegram bot itself — bot sends auth URL, user paste
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -58,11 +59,12 @@ def _get_service():
     if Path(TOKEN_FILE).exists():
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
     if creds and creds.expired and creds.refresh_token:
+        from google.auth.exceptions import RefreshError
         try:
             creds.refresh(Request())
             with open(TOKEN_FILE, "w") as f:
                 f.write(creds.to_json())
-        except Exception as e:
+        except RefreshError as e:
             logger.error(f"[GCal] Token refresh failed: {e}")
             # Token revoked or expired — remove it so is_connected() returns False
             try:
@@ -70,12 +72,24 @@ def _get_service():
             except Exception:
                 pass
             return None
+        except Exception as e:
+            # Network/transient error — keep the token; deleting it here used
+            # to force a full re-auth over a momentary connection blip.
+            logger.error(f"[GCal] Token refresh error (token kept): {e}")
+            return None
     if not creds or not creds.valid:
         return None
     return build("calendar", "v3", credentials=creds)
 
 
+# Loopback redirect. Google blocks the old out-of-band "urn:ietf:wg:oauth:2.0:oob"
+# redirect for apps in Production ("Error 400: invalid_request") — it only kept
+# working while the OAuth app was in Testing, whose refresh tokens die after 7
+# days. After approving, the browser lands on an unreachable http://localhost/?code=...
+# page; Joe pastes that whole URL back to the bot (see extract_auth_code).
+REDIRECT_URI = "http://localhost"
 FLOW_STATE_FILE = "data/gcal_flow_state.json"
+HEALTH_FILE = "data/gcal_health.json"
 _active_flow = None  # keep flow in memory to preserve code_verifier
 
 
@@ -90,7 +104,7 @@ def get_auth_url() -> str | None:
         from google_auth_oauthlib.flow import Flow
         flow = Flow.from_client_secrets_file(
             CREDENTIALS_FILE, scopes=SCOPES,
-            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+            redirect_uri=REDIRECT_URI
         )
         auth_url, _ = flow.authorization_url(prompt="consent")
         _active_flow = flow  # preserve so code_verifier survives until complete_auth
@@ -100,9 +114,19 @@ def get_auth_url() -> str | None:
         return None
 
 
+def extract_auth_code(text: str) -> str | None:
+    """Pulls the OAuth code out of a pasted http://localhost/?...code=... redirect URL."""
+    from urllib.parse import urlparse, parse_qs
+    m = re.search(r"https?://localhost\S*", text or "")
+    if not m:
+        return None
+    return (parse_qs(urlparse(m.group(0)).query).get("code") or [None])[0]
+
+
 def complete_auth(code: str) -> bool:
-    """Exchange the auth code for a token and save it."""
+    """Exchange the auth code (or the pasted localhost redirect URL) for a token and save it."""
     global _active_flow
+    code = extract_auth_code(code) or code
     if not Path(CREDENTIALS_FILE).exists():
         return False
     try:
@@ -114,7 +138,7 @@ def complete_auth(code: str) -> bool:
             # Fallback: recreate without PKCE (works if auth URL was also generated without it)
             flow = Flow.from_client_secrets_file(
                 CREDENTIALS_FILE, scopes=SCOPES,
-                redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+                redirect_uri=REDIRECT_URI
             )
 
         flow.fetch_token(code=code)
@@ -400,3 +424,72 @@ def modify_event(event_id: str, updates: dict, all_recurring: bool = False) -> b
     except Exception as e:
         logger.error(f"[GCal] modify_event failed: {e}")
         return False
+
+
+def check_connection() -> str:
+    """Forces a token refresh to prove the stored refresh token still works.
+    Returns "ok", "revoked" (Google rejected it — token file removed, needs
+    re-auth), "not_connected" (no token file), or "error" (network/other —
+    token kept, try again next time)."""
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    from google.auth.exceptions import RefreshError
+
+    if not is_connected():
+        return "not_connected"
+    try:
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        creds.refresh(Request())
+        with open(TOKEN_FILE, "w") as f:
+            f.write(creds.to_json())
+        return "ok"
+    except RefreshError as e:
+        logger.error(f"[GCal] Daily check: refresh token rejected: {e}")
+        try:
+            Path(TOKEN_FILE).unlink()
+        except Exception:
+            pass
+        return "revoked"
+    except Exception as e:
+        logger.error(f"[GCal] Daily check: refresh error (token kept): {e}")
+        return "error"
+
+
+async def run_daily_check(bot) -> None:
+    """Daily scheduled job: alerts Joe on Telegram when the calendar
+    connection breaks, instead of him only finding out the next time an
+    "add to calendar" fails. Alerts once per breakage — "last_ok" in
+    HEALTH_FILE tracks whether he's already been told, so a deliberately
+    disconnected calendar doesn't nag every day. A later successful check
+    (after he re-connects) re-arms the alert."""
+    import asyncio
+    from modules.utils import OWNER_CHAT_ID
+
+    status = await asyncio.to_thread(check_connection)
+    logger.info(f"[GCal] Daily connection check: {status}")
+    if status == "error":
+        return  # transient — don't flip state or alert over a network blip
+
+    try:
+        last_ok = json.loads(Path(HEALTH_FILE).read_text()).get("last_ok", True)
+    except Exception:
+        last_ok = True
+
+    if status == "ok":
+        Path(HEALTH_FILE).write_text(json.dumps({"last_ok": True}))
+        return
+
+    # "revoked" or "not_connected" — the token may also have been removed
+    # earlier by _get_service during normal use, which is why "not_connected"
+    # still alerts if the last check was fine.
+    if last_ok:
+        await bot.send_message(
+            chat_id=OWNER_CHAT_ID,
+            text=(
+                "⚠️ Google Calendar 已斷線（授權失效或被取消）。\n"
+                "Google Calendar is disconnected — the authorization expired or was revoked.\n\n"
+                "跟我說「connect google calendar」重新連接。\n"
+                "Say \"connect google calendar\" to reconnect."
+            ),
+        )
+    Path(HEALTH_FILE).write_text(json.dumps({"last_ok": False}))
