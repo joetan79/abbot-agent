@@ -30,9 +30,9 @@ def _save(data: dict):
 
 def compress_week():
     """Read the past 7 days of learn_log + memories and compress into a summary.
-    Called by the weekly scheduled job (Monday). Very cheap — one MODEL_FAST call."""
+    Called by the weekly scheduled job (Monday). One MODEL_SMART call."""
     try:
-        from modules.utils import ask_claude, MODEL_FAST
+        from modules.utils import ask_claude, MODEL_SMART, MEMORY_FILE, HISTORY_FILE, OWNER_CHAT_ID, _load as _load_json
         from modules.learner import get_weekly_summary
 
         # Gather source material
@@ -40,39 +40,54 @@ def compress_week():
         conv_items = ls.get("sample_conv_learnings", [])
         approved_web = [e["content"] for e in ls.get("web_approved", [])]
 
-        # Also pull recent memory entries
+        # Memories saved/updated this week, and Joe's own chat messages from
+        # the week. This used to read data/memory_categorized.json, which
+        # doesn't exist (memories live in memory.json), so memories never
+        # reached the weekly summary at all.
+        week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+        recent_mem = []
         try:
-            with open("data/memory_categorized.json") as f:
-                cat_mem = json.load(f)
-            recent_mem = []
-            for cat, entries in cat_mem.items():
-                if isinstance(entries, list):
-                    recent_mem.extend([f"[{cat}] {e}" for e in entries[-3:]])
-                elif isinstance(entries, dict):
-                    recent_mem.extend([f"[{cat}] {k}: {v}" for k, v in list(entries.items())[-3:]])
+            for k, v in _load_json(MEMORY_FILE).items():
+                if isinstance(v, dict) and v.get("updated", "") >= week_ago:
+                    recent_mem.append(f"[memory] {k}: {v.get('value')}")
         except Exception:
-            recent_mem = []
+            pass
+        joe_msgs = []
+        try:
+            for m in _load_json(HISTORY_FILE).get(str(OWNER_CHAT_ID), []):
+                if m.get("role") == "user" and m.get("timestamp", "") >= week_ago:
+                    joe_msgs.append(f"[Joe said] {m['content'][:300]}")
+        except Exception:
+            pass
 
-        if not conv_items and not approved_web and not recent_mem:
+        if not conv_items and not approved_web and not recent_mem and not joe_msgs:
             logger.info("[Episodic] Nothing to compress this week")
             return
 
         source = "\n".join(
-            conv_items[:10] + approved_web[:5] + recent_mem[:10]
+            recent_mem[:30] + joe_msgs[-25:] + conv_items[:10] + approved_web[:5]
         )
 
         prompt = (
             "Summarise what was learned about this user (Joe) this week into 5-8 concise bullet points.\n"
             "Focus on: interests, preferences, patterns, goals, what he was working on.\n"
-            "Be specific — avoid vague statements like 'interested in technology'.\n\n"
+            "Be specific — avoid vague statements like 'interested in technology'.\n"
+            "Only include things that say something lasting about Joe or his family — skip "
+            "one-off requests (weather lookups, a single quiz) and bot/setup chatter.\n"
+            "If there is nothing meaningful, output exactly: NONE\n\n"
             f"Source material:\n{source}\n\n"
             "Output bullet points only, one per line, starting with •"
         )
 
         summary = ask_claude(
             "You are a concise memory summariser. Output bullet points only.",
-            prompt, model=MODEL_FAST, max_tokens=300
+            prompt, model=MODEL_SMART, max_tokens=400
         )
+        # Don't store "no information this week" filler — it was being
+        # injected into every chat's system prompt as LONG-TERM MEMORY.
+        if summary.strip().upper().startswith("NONE") or "•" not in summary:
+            logger.info("[Episodic] Nothing meaningful this week — not saved")
+            return
 
         week_str = datetime.now().strftime("%Y-W%W")
         data = _load()

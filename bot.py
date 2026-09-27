@@ -12,7 +12,7 @@ from telegram.ext import (
     MessageHandler, ContextTypes, filters,
     CallbackQueryHandler,
 )
-from modules.utils import handle_photo, photo_cache_set
+from modules.utils import handle_photo, photo_cache_set, history_add
 from modules import gmail_monitor
 from modules import gout_tracker
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -545,12 +545,29 @@ async def _flush_media_group(group_id: str, bot) -> None:
     await _process_photo_batch(bot, entry["chat_id"], entry["photos"], entry["caption"], entry["is_owner_sender"], entry["reply_msg"])
 
 
+def _photo_history_add(user_id, n_photos: int, caption: str, reply: str) -> None:
+    """Records a photo exchange in the sender's chat history. Photo replies
+    used to skip history entirely, so a text follow-up had no idea what was
+    discussed — e.g. Isaac: "2,4,5 and 7 are the wrong words, can you check
+    the list again" → "I don't have the word list you're referring to"
+    (history.json, 2026-09-24). The image itself isn't stored — only the
+    caption and ABbot's reply (which normally restates what's in the photo)."""
+    try:
+        label = "a photo" if n_photos == 1 else f"{n_photos} photos"
+        history_add(str(user_id), "user", f"[Sent {label}] {caption}".strip())
+        history_add(str(user_id), "assistant", reply)
+    except Exception as e:
+        logger.error(f"photo history_add failed: {e}")
+
+
 async def _reply_calendar_from_photos(bot, photos: list, caption: str, reply_msg) -> None:
     try:
         reply = await add_calendar_events_from_photos(bot, photos, caption)
     except Exception as e:
         logger.error(f"[GCal] add from photo failed: {e}")
         reply = "❌ Sorry, something went wrong adding that to your calendar. Please try again."
+    if reply_msg.from_user:
+        _photo_history_add(reply_msg.from_user.id, len(photos), caption, reply)
     try:
         await reply_msg.reply_text(reply, parse_mode="Markdown")
     except Exception:
@@ -628,6 +645,7 @@ async def _process_photo_batch(bot, chat_id: int, photos: list, caption: str, is
     reply = await handle_photo(bot, combined_photos, combined_caption)
     sent = await bot.send_message(chat_id=chat_id, text=f"🖼 {reply}")
     photo_cache_set(sent.message_id, combined_photos[0][-1].file_id)
+    _photo_history_add(sender_id, len(photos), caption, reply)
 
     # Log interaction for daily family digest — photo replies (e.g.
     # Isaac's homework photos) previously never reached log_interaction,

@@ -1832,7 +1832,7 @@ async def add_calendar_events_from_photos(bot, photos: list, caption: str) -> st
     via _gcal_add_from_intent — the same path the text "gcal_add" intent
     uses. Returns the user-facing summary text (Markdown)."""
     from modules.gcal import is_connected
-    from modules.utils import claude, photo_content_blocks
+    from modules.utils import claude, photo_content_blocks, model_kwargs
     import pytz as _pytz
 
     if not is_connected():
@@ -1844,29 +1844,48 @@ async def add_calendar_events_from_photos(bot, photos: list, caption: str) -> st
         f"Today is {today.strftime('%A, %Y-%m-%d')}. If a date in the image has no year, use the next "
         "upcoming occurrence of that date.\n"
         "The user's caption may narrow which events to add or give extra details (title, color...) — follow it.\n"
-        "Return ONLY a JSON array (no markdown), one object per event:\n"
+        "Return one object per event in \"events\":\n"
         '{"action": short event title, "start_date": "YYYY-MM-DD", "time": "HH:MM" 24h start or null, '
         '"end_time": "HH:MM" or null, "all_day": true only if the image clearly marks it all-day or gives no time at all, '
         '"end_date": "YYYY-MM-DD" end of a recurring range or null, '
         '"recur_days": list of weekday names if it repeats weekly or null, "color": color name if the user asked or null}\n'
         "Include the location in the title if one is shown (e.g. \"Dentist @ Kiang Wu\"). "
-        "If there are no events at all, return []."
+        "If there are no events at all, return an empty events list."
     )
+    # Structured output — guarantees bare JSON. Sonnet 5 otherwise sometimes
+    # wrote a sentence before the JSON, which broke json.loads.
+    _s = {"type": ["string", "null"]}
+    schema = {
+        "type": "object",
+        "properties": {"events": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string"}, "start_date": _s, "time": _s, "end_time": _s,
+                "all_day": {"type": "boolean"}, "end_date": _s,
+                "recur_days": {"type": ["array", "null"], "items": {"type": "string"}},
+                "color": _s,
+            },
+            "required": ["action", "start_date", "time", "end_time", "all_day", "end_date", "recur_days", "color"],
+            "additionalProperties": False,
+        }}},
+        "required": ["events"],
+        "additionalProperties": False,
+    }
     content = await photo_content_blocks(bot, photos)
     content.append({"type": "text", "text": f"Caption: {caption or '(none)'}"})
     # Threaded — a blocking SDK call here would freeze the whole event loop
     # (see handle_photo / gout_tracker for that bug).
     r = await asyncio.to_thread(
         claude.messages.create,
-        model=MODEL_SMART,
-        max_tokens=1500,
+        **model_kwargs(MODEL_SMART, 1500),
         system=system,
         messages=[{"role": "user", "content": content}],
+        output_config={"format": {"type": "json_schema", "schema": schema}},
         timeout=60.0,
     )
     raw = r.content[0].text.strip()
     try:
-        events = json.loads(raw.strip("`").removeprefix("json").strip())
+        events = json.loads(raw).get("events", [])
     except Exception:
         logger.error(f"[GCal] photo event extraction returned non-JSON: {raw[:300]!r}")
         return "Sorry, I couldn't read the event details from that photo. Could you type them out (title, date, time)?"
@@ -3584,8 +3603,10 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         user_id = str(update.effective_user.id)
         text_for_context = text  # includes quoted context for Claude
 
-        # Auto extract and save new memories from raw text only
-        auto_extract_memory(user_id, original_text)
+        # Auto extract and save new memories from raw text only — in a
+        # background thread: it's a blocking Claude call and nothing below
+        # depends on it, so it mustn't delay the reply or freeze the loop.
+        asyncio.get_running_loop().run_in_executor(None, auto_extract_memory, user_id, original_text)
 
         # Selective memory injection based on query
         relevant_mem = get_relevant_memories(

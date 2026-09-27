@@ -449,7 +449,7 @@ async def _vision_analyze_ids(bot, file_ids: list, caption: str, will_log: bool)
     the wording of the instruction sent to Claude (logged vs. quick lookup) —
     it does NOT itself write to the diary; callers decide whether to call
     _add_entry."""
-    from modules.utils import claude, MODEL_SMART
+    from modules.utils import claude, MODEL_SMART, model_kwargs
     from modules.skills_loader import load_skills
     import base64
     import httpx
@@ -492,8 +492,7 @@ async def _vision_analyze_ids(bot, file_ids: list, caption: str, will_log: bool)
     # ask_claude call; see that comment for what a frozen loop causes).
     r = await asyncio.to_thread(
         claude.messages.create,
-        model=MODEL_SMART,
-        max_tokens=1400,
+        **model_kwargs(MODEL_SMART, 1400),
         system=load_skills(scope="gout"),
         messages=[{"role": "user", "content": content}],
         timeout=60.0,

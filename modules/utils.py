@@ -9,8 +9,28 @@ logger = logging.getLogger(__name__)
 
 # Model selection
 MODEL_FAST    = "claude-haiku-4-5-20251001"   # Simple tasks
-MODEL_SMART   = "claude-sonnet-4-6"            # Complex tasks + vision
+MODEL_SMART   = "claude-sonnet-5"              # Complex tasks + vision (was claude-sonnet-4-6 until 2026-09-27)
 MODEL_PREMIUM = "claude-haiku-4-5-20251001"     # AI Pulse & Updates (xfeed)
+
+
+
+def model_kwargs(model: str, max_tokens: int) -> dict:
+    """model / max_tokens (+ thinking) kwargs for claude.messages.create.
+
+    Sonnet 5 differs from Sonnet 4.6 in two ways that matter here:
+    - omitting `thinking` runs adaptive thinking (4.6 ran thinking-off), which
+      adds latency and eats into max_tokens — so disable it explicitly to keep
+      4.6's behaviour;
+    - its tokenizer uses ~30% more tokens for the same text, so every
+      max_tokens tuned on 4.6 is scaled by 1.3 — otherwise long replies get cut
+      off (the gout analysis's last indicator already got truncated once at
+      max_tokens=900, see gout_tracker.py).
+    Other models (Haiku) are passed through unchanged."""
+    if model.startswith("claude-sonnet-5"):
+        return {"model": model, "max_tokens": int(max_tokens * 1.3),
+                "thinking": {"type": "disabled"}}
+    return {"model": model, "max_tokens": max_tokens}
+
 
 # ── Memory Categories ─────────────────────────────────────────────────────────
 MEMORY_CATEGORIES = {
@@ -157,8 +177,7 @@ def ask_claude(system: str, user_msg: str, max_tokens: int = 1500,
     for attempt in range(max_retries + 1):
         try:
             r = claude.messages.create(
-                model=model,
-                max_tokens=max_tokens,
+                **model_kwargs(model, max_tokens),
                 system=system,
                 messages=[{"role": "user", "content": user_msg}],
                 timeout=timeout,
@@ -460,147 +479,40 @@ def get_relevant_memories(
         max_categories: int = 3,
         max_entries_per_category: int = 5) -> str:
     """
-    Get memories most relevant to the query.
-    Uses 3-layer selective injection to control token cost.
+    Returns ALL saved memories for the system prompt, grouped by category,
+    most recently updated first.
 
-    Layer 1 — Category keyword match:
-      Score query against category keyword lists.
-      Inject top matching categories.
-
-    Layer 2 — Direct key/value text search:
-      Search query words directly in all memory
-      keys and values. Catches named things like
-      "Whiskers", "ABC 1234" with no category hit.
-
-    Layer 3 — Safety net:
-      If nothing matched, return 3 most recently
-      updated memories so context is never empty.
+    Previously this picked "relevant" memories by splitting the query on
+    spaces and matching English category keywords — Chinese messages have no
+    spaces and rarely hit an English keyword, so most saved memories were
+    never shown to the model ("I told you before!" memory failures). It also
+    capped each category at its 5 OLDEST entries. The whole store is small
+    (~50 entries, ~2.5K chars), so sending all of it is cheap and removes
+    retrieval misses entirely. `query`/`max_*` are kept only so existing
+    callers don't break. If the store ever grows past ~300 entries, revisit.
     """
-    if not query:
-        return get_core_preferences()
-
-    query_lower = query.lower()
-    # Meaningful words only (skip single/two-char words)
-    query_words = [w for w in query_lower.split() if len(w) > 2]
-
     all_mem = _load(MEMORY_FILE)
-    result_lines = []
-    total_entries = 0
-    matched_keys: set = set()
-    # Tracks whether a specific/intentional match was found
-    # (beyond the automatic preferences baseline).
-    # Layer 3 fires when this stays False.
-    has_specific_match = False
-
-    # ── Layer 1: Category keyword scoring ────────────────────────────────────
-    category_scores = {}
-    for category, keywords in MEMORY_CATEGORIES.items():
-        score = sum(1 for kw in keywords if kw in query_lower)
-        if score > 0:
-            category_scores[category] = score
-
-    # Always include preferences (minimal baseline).
-    # Adding +1 means it never scores zero, but real hits
-    # (other categories or direct text) outscore it.
-    category_scores["preferences"] = \
-        category_scores.get("preferences", 0) + 1
-
-    top_categories = sorted(
-        category_scores.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )[:max_categories]
-
-    for category, score in top_categories:
-        cat_entries = {}
-        for key, data in all_mem.items():
-            if isinstance(data, dict):
-                value = data.get("value", "")
-                mem_cat = data.get(
-                    "category",
-                    categorize_memory(key, str(value))
-                )
-            else:
-                value = data
-                mem_cat = categorize_memory(key, str(data))
-            if mem_cat == category:
-                cat_entries[key] = value
-
-        if cat_entries:
-            limited = dict(
-                list(cat_entries.items())[:max_entries_per_category]
-            )
-            result_lines.append(f"\n[{category.upper()} MEMORIES]")
-            for k, v in limited.items():
-                result_lines.append(f"- {k}: {v}")
-                matched_keys.add(k)
-            total_entries += len(limited)
-            # Preferences is always included as baseline,
-            # so only count other categories as specific matches.
-            if category != "preferences":
-                has_specific_match = True
-
-    # ── Layer 2: Direct key/value text search ────────────────────────────────
-    # Catches named things ("Whiskers", "ABC 1234") that have no category hit.
-    if query_words:
-        direct_matches = {}
-        for key, data in all_mem.items():
-            if key in matched_keys:
-                continue  # already included from Layer 1
-            if isinstance(data, dict):
-                value = data.get("value", "")
-            else:
-                value = data
-            key_lower = key.lower()
-            val_lower = str(value).lower()
-            if any(
-                word in key_lower or word in val_lower
-                for word in query_words
-            ):
-                direct_matches[key] = value
-
-        if direct_matches:
-            result_lines.append("\n[DIRECT MATCHES]")
-            for k, v in list(direct_matches.items())[:5]:
-                result_lines.append(f"- {k}: {v}")
-                matched_keys.add(k)
-            total_entries += len(direct_matches)
-            has_specific_match = True
-
-    # ── Layer 3: Safety net — 3 most recent memories ─────────────────────────
-    # Fires when neither L1 (beyond preferences) nor L2 found anything.
-    # Ensures the response always has some useful personal context.
-    if not has_specific_match:
-        recent = []
-        for key, data in all_mem.items():
-            if key in matched_keys:
-                continue  # skip already-shown preference entries
-            if isinstance(data, dict):
-                value = data.get("value", "")
-                updated = data.get("updated", "")
-            else:
-                value = data
-                updated = ""
-            recent.append((key, value, updated))
-        recent.sort(key=lambda x: x[2], reverse=True)
-        if recent:
-            result_lines.append("\n[RECENT MEMORIES]")
-            for k, v, _ in recent[:3]:
-                result_lines.append(f"- {k}: {v}")
-            total_entries += min(3, len(recent))
-
-    if not result_lines:
+    if not all_mem:
         return get_core_preferences()
 
-    logger.debug(
-        f"Memory injection: {total_entries} entries "
-        f"(~{total_entries * 15} tokens)"
-    )
+    by_cat: dict = {}
+    for key, data in all_mem.items():
+        if isinstance(data, dict):
+            value = data.get("value", "")
+            cat = data.get("category") or categorize_memory(key, str(value))
+            updated = data.get("updated", "")
+        else:
+            value, cat, updated = data, categorize_memory(key, str(data)), ""
+        by_cat.setdefault(cat, []).append((updated, key, value))
 
-    return (
-        "RELEVANT MEMORIES (use these in response):\n" +
-        "\n".join(result_lines)
-    )
+    lines = ["SAVED MEMORIES (everything Joe has told you to remember or that was learned "
+             "from past chats — use them; never claim you don't know something listed here):"]
+    for cat in sorted(by_cat):
+        lines.append(f"\n[{cat.upper()}]")
+        for _, k, v in sorted(by_cat[cat], key=lambda x: x[0], reverse=True):
+            lines.append(f"- {k}: {v}")
+    return "\n".join(lines)
+
 
 def schedule_next_id() -> str:
     jobs = _load(SCHEDULE_FILE)
@@ -721,8 +633,7 @@ async def handle_photo(bot, photos: list, caption: str = "") -> str:
         # comments for what a frozen loop causes).
         r = await asyncio.to_thread(
             claude.messages.create,
-            model=MODEL_SMART,
-            max_tokens=1500,
+            **model_kwargs(MODEL_SMART, 1500),
             system=load_skills(scope="study"),
             messages=[{"role": "user", "content": content}],
             timeout=60.0,
@@ -783,8 +694,7 @@ async def handle_photo_reanalysis(bot, file_id: str, user_question: str, scope: 
         )
         r = await asyncio.to_thread(
             claude.messages.create,
-            model=MODEL_SMART,
-            max_tokens=1500,
+            **model_kwargs(MODEL_SMART, 1500),
             system=load_skills(scope=scope),
             messages=[{
                 "role": "user",
@@ -872,8 +782,7 @@ def ask_claude_with_history(system: str, user_msg: str,
             history = history_get(user_id, limit=10)
             messages = history + [{"role": "user", "content": user_msg}]
             r = claude.messages.create(
-                model=model,
-                max_tokens=max_tokens,
+                **model_kwargs(model, max_tokens),
                 system=system,
                 messages=messages,
                 timeout=20.0,
@@ -904,13 +813,26 @@ def auto_extract_memory(user_id: str, text: str):
     Auto extract and save memories from conversation.
     Uses categorized storage for better retrieval.
     """
-    system = """Extract personal facts or preferences from this message worth remembering long term,
-e.g. key "meal_breakfast", value "oats and banana at 7am".
-importance: "high" = must always follow
-            "medium" = helpful context
-            "low" = nice to know
-Only extract clear explicit facts; skip questions and temporary info.
-Return an empty facts list if nothing is worth remembering."""
+    existing = _load(MEMORY_FILE)
+    existing_lines = "\n".join(
+        f"- {k}: {v.get('value') if isinstance(v, dict) else v}" for k, v in existing.items()
+    ) or "(none yet)"
+    system = f"""You maintain the long-term memory of ABbot, Joe's personal assistant (Joe's kids: Isaac and Arik).
+From Joe's message below, extract facts that will STILL be true and useful weeks from now:
+habits and routines, family and people, health conditions, likes/dislikes, standing instructions
+for how ABbot should behave, important recurring places or dates.
+
+Do NOT extract: one-off events or status ("quiz has been scheduled", "answers were late"),
+questions, anything about the current conversation only, or anything already in memory unchanged.
+Messages may be in Chinese or English — write values in the language Joe used.
+
+If a fact updates something already stored, REUSE that exact key so it's overwritten, not duplicated.
+New keys: short snake_case, e.g. "meal_breakfast" = "oats and banana at 7am".
+importance: "high" = must always follow, "medium" = helpful context, "low" = nice to know.
+Most messages contain nothing worth remembering — return an empty facts list then.
+
+ALREADY IN MEMORY:
+{existing_lines}"""
     schema = {
         "type": "object",
         "properties": {"facts": {"type": "array", "items": {
@@ -928,7 +850,9 @@ Return an empty facts list if nothing is worth remembering."""
         "additionalProperties": False,
     }
     try:
-        raw = ask_claude(system, text, max_tokens=300, model=MODEL_FAST, schema=schema)
+        # Sonnet (was Haiku): Haiku saved almost nothing useful in 3 months
+        # and a few pieces of one-off junk — see memory cleanup 2026-09-27.
+        raw = ask_claude(system, text, max_tokens=400, model=MODEL_SMART, schema=schema)
         import json
         facts = json.loads(raw)["facts"]
         for fact in facts:
@@ -1031,8 +955,7 @@ def ask_claude_with_search(system: str, user_msg: str,
             messages = [{"role": "user", "content": user_msg}]
 
         r = claude.messages.create(
-            model=model,
-            max_tokens=max_tokens,
+            **model_kwargs(model, max_tokens),
             system=system,
             tools=[{
                 "type": "web_search_20250305",
@@ -1051,8 +974,7 @@ def ask_claude_with_search(system: str, user_msg: str,
         if r.stop_reason == "pause_turn":
             messages = messages + [{"role": "assistant", "content": r.content}]
             r = claude.messages.create(
-                model=model,
-                max_tokens=max_tokens,
+                **model_kwargs(model, max_tokens),
                 system=system,
                 tools=[{"type": "web_search_20250305", "name": "web_search"}],
                 messages=messages,
@@ -1183,8 +1105,7 @@ def ask_claude_news(system: str, user_msg: str, max_tokens: int = 1500) -> str:
     """Use Haiku model for news - much cheaper for high input token tasks like web search."""
     try:
         r = claude.messages.create(
-            model=MODEL_FAST,
-            max_tokens=max_tokens,
+            **model_kwargs(MODEL_FAST, max_tokens),
             system=system,
             tools=[{
                 "type": "web_search_20250305",
