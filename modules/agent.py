@@ -2966,7 +2966,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await run_scheduled_job(context.bot, "manual_news", "news_ai")
 
     elif intent == "xfeed":
-        import asyncio, httpx, os
+        import httpx, os  # asyncio: module-level import (a local one here shadowed it for the whole function)
         from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published, parse_claude_news_response, get_xfeed_search_prompt
 
         hours = min(int(intent_data.get("hours") or 24), 72)
