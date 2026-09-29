@@ -21,7 +21,7 @@ from .utils import (
     OWNER_CHAT_ID,
     clean_response,
     get_cached_news, set_cached_news,
-    MODEL_FAST, MODEL_SMART, MODEL_PREMIUM,
+    MODEL_FAST, MODEL_SMART,
     parse_duration_to_seconds,
 )
 from .skills_loader import load_skills, list_skills, get_skill_token_estimate
@@ -942,7 +942,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
                     get_xfeed_search_prompt(),
                     None,
                     2000,
-                    MODEL_PREMIUM,
+                    MODEL_FAST,
                 )
                 posts = parse_claude_news_response(raw) if raw else []
             except Exception as fe:
@@ -1802,11 +1802,21 @@ async def _gcal_add_from_intent(intent_data: dict) -> str:
 
     # Single event
     start_dt = _tz.localize(datetime(start_date.year, start_date.month, start_date.day, sh, sm, 0))
-    end_dt = _tz.localize(datetime(start_date.year, start_date.month, start_date.day, eh, em, 0))
+    # Events that end on a later day (overnight flights: 20:20 → 00:05 next
+    # day) — use end_date when given (without recur_days it means "ends on",
+    # not a recurrence range), and if the end still isn't after the start,
+    # roll it to the next day. Previously the end was always put on the start
+    # date, so Google rejected it: "The specified time range is empty"
+    # (bot.log 2026-09-29 10:48, HKG→PEN U0768).
+    end_date = _parse_date(end_date_str.lower()) if end_date_str else start_date
+    end_dt = _tz.localize(datetime(end_date.year, end_date.month, end_date.day, eh, em, 0))
+    if end_dt <= start_dt:
+        end_dt += timedelta(days=1)
     if add_event(title, start_dt, end_dt, color=color):
+        next_day = " (+1 day)" if end_dt.date() != start_dt.date() else ""
         return (
             f"✅ Added to calendar: *{title}*\n"
-            f"{start_date.strftime('%a %d %b')} {time_str}–{end_time_str or f'{eh:02d}:{em:02d}'}"
+            f"{start_date.strftime('%a %d %b')} {time_str}–{end_time_str or f'{eh:02d}:{em:02d}'}{next_day}"
         )
     return "❌ Failed to add event. Check calendar connection."
 
@@ -1832,7 +1842,7 @@ async def add_calendar_events_from_photos(bot, photos: list, caption: str) -> st
     via _gcal_add_from_intent — the same path the text "gcal_add" intent
     uses. Returns the user-facing summary text (Markdown)."""
     from modules.gcal import is_connected
-    from modules.utils import claude, photo_content_blocks, model_kwargs
+    from modules.utils import claude, photo_content_blocks, model_kwargs, response_text
     import pytz as _pytz
 
     if not is_connected():
@@ -1883,7 +1893,7 @@ async def add_calendar_events_from_photos(bot, photos: list, caption: str) -> st
         output_config={"format": {"type": "json_schema", "schema": schema}},
         timeout=60.0,
     )
-    raw = r.content[0].text.strip()
+    raw = response_text(r).strip()
     try:
         events = json.loads(raw).get("events", [])
     except Exception:
@@ -2983,7 +2993,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 get_xfeed_search_prompt(),
                 None,
                 2000,
-                MODEL_PREMIUM,
+                MODEL_FAST,
             )
             posts = parse_claude_news_response(raw) if raw else []
 
@@ -3872,7 +3882,7 @@ async def cmd_xfeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 get_xfeed_search_prompt(),
                 None,
                 2000,
-                MODEL_PREMIUM,
+                MODEL_FAST,
             )
             posts = parse_claude_news_response(raw) if raw else []
             if not posts:

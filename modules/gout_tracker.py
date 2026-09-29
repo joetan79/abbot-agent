@@ -449,7 +449,7 @@ async def _vision_analyze_ids(bot, file_ids: list, caption: str, will_log: bool)
     the wording of the instruction sent to Claude (logged vs. quick lookup) —
     it does NOT itself write to the diary; callers decide whether to call
     _add_entry."""
-    from modules.utils import claude, MODEL_SMART, model_kwargs
+    from modules.utils import claude, MODEL_SMART, model_kwargs, response_text
     from modules.skills_loader import load_skills
     import base64
     import httpx
@@ -497,7 +497,7 @@ async def _vision_analyze_ids(bot, file_ids: list, caption: str, will_log: bool)
         messages=[{"role": "user", "content": content}],
         timeout=60.0,
     )
-    return r.content[0].text
+    return response_text(r)
 
 
 async def analyze_meal_photo(bot, photos, caption: str = "") -> str:

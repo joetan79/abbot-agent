@@ -8,9 +8,8 @@ import anthropic
 logger = logging.getLogger(__name__)
 
 # Model selection
-MODEL_FAST    = "claude-haiku-4-5-20251001"   # Simple tasks
-MODEL_SMART   = "claude-sonnet-5"              # Complex tasks + vision (was claude-sonnet-4-6 until 2026-09-27)
-MODEL_PREMIUM = "claude-haiku-4-5-20251001"     # AI Pulse & Updates (xfeed)
+MODEL_FAST    = "claude-haiku-4-5-20251001"   # Simple tasks + AI Pulse & Updates (xfeed; MODEL_PREMIUM merged in 2026-09-29)
+MODEL_SMART   = "claude-sonnet-5-5"            # Complex tasks + vision (sonnet-4-6 → sonnet-5 on 2026-09-27 → sonnet-5-5 on 2026-09-29)
 
 
 
@@ -25,11 +24,33 @@ def model_kwargs(model: str, max_tokens: int) -> dict:
       max_tokens tuned on 4.6 is scaled by 1.3 — otherwise long replies get cut
       off (the gout analysis's last indicator already got truncated once at
       max_tokens=900, see gout_tracker.py).
+    Sonnet 5.5 rejects thinking "disabled" with a 400 — its lowest setting is
+    "between_tools" (no up-front thinking; without tools the reply is plain
+    text). It's only accepted at effort high or below; the default is high.
+    Match model IDs exactly — "claude-sonnet-5-5".startswith("claude-sonnet-5")
+    is True, so a prefix check would send Sonnet 5's setting to 5.5.
     Other models (Haiku) are passed through unchanged."""
-    if model.startswith("claude-sonnet-5"):
+    if model == "claude-sonnet-5-5":
+        return {"model": model, "max_tokens": int(max_tokens * 1.3),
+                "thinking": {"type": "between_tools"}}
+    if model == "claude-sonnet-5":
         return {"model": model, "max_tokens": int(max_tokens * 1.3),
                 "thinking": {"type": "disabled"}}
     return {"model": model, "max_tokens": max_tokens}
+
+
+def response_text(r) -> str:
+    """The reply text of a messages.create response. Reads blocks by type —
+    on Sonnet 5.5 a response can contain `thinking` blocks, so content[0] isn't
+    guaranteed to be text. Also turns a safety decline (stop_reason
+    "refusal", which Sonnet 5.5 returns in more categories than Sonnet 5)
+    into a readable message instead of an empty string / IndexError."""
+    text = "".join(b.text for b in r.content if getattr(b, "type", "") == "text")
+    if getattr(r, "stop_reason", None) == "refusal" and not text.strip():
+        cat = getattr(getattr(r, "stop_details", None), "category", None)
+        logger.warning(f"Claude declined the request (refusal, category={cat})")
+        return "抱歉，這個請求我不能處理，請換個方式問。 | Sorry, I can't help with that request — please try rephrasing it."
+    return text
 
 
 # ── Memory Categories ─────────────────────────────────────────────────────────
@@ -184,7 +205,7 @@ def ask_claude(system: str, user_msg: str, max_tokens: int = 1500,
                 **({"output_config": {"format": {"type": "json_schema", "schema": schema}}}
                    if schema else {}),
             )
-            return r.content[0].text
+            return response_text(r)
         except anthropic.APITimeoutError:
             logger.warning(
                 f"Claude timeout attempt {attempt+1}/{max_retries+1}")
@@ -638,7 +659,7 @@ async def handle_photo(bot, photos: list, caption: str = "") -> str:
             messages=[{"role": "user", "content": content}],
             timeout=60.0,
         )
-        return r.content[0].text
+        return response_text(r)
     except Exception as e:
         logger.error(f"Photo handling error: {e}")
         return "Sorry, I couldn't process that image. Please try again."
@@ -712,7 +733,7 @@ async def handle_photo_reanalysis(bot, file_id: str, user_question: str, scope: 
             }],
             timeout=60.0,
         )
-        return r.content[0].text
+        return response_text(r)
     except Exception as e:
         logger.error(f"Photo re-analysis error: {e}")
         return "Sorry, I couldn't re-analyse that image. Please try again."
@@ -787,7 +808,7 @@ def ask_claude_with_history(system: str, user_msg: str,
                 messages=messages,
                 timeout=20.0,
             )
-            response_text = r.content[0].text
+            response_text = response_text(r)
             history_add(user_id, "user", save_text)
             history_add(user_id, "assistant", response_text)
             return response_text
