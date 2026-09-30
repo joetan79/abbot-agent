@@ -39,6 +39,39 @@ logging.basicConfig(
     handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
+
+
+from telegram.request import HTTPXRequest
+
+
+class _RetryingTelegramRequest(HTTPXRequest):
+    """Bot API requests (not getUpdates polling) with connect retries.
+
+    The server's route to api.telegram.org intermittently takes 10-50s to
+    establish a TCP connection (measured 2026-09-30: most connects ~0.17s,
+    one 11s, one 54s, on both IPv4 and IPv6). With a single 20s connect
+    timeout, a message that hit one slow connect simply failed ("route_message
+    error: Timed out", 08:08/08:09) and Joe got no reply. Now a connect that
+    hasn't completed in 6s is abandoned and retried on a fresh connection (up
+    to 2 retries — httpx transport retries only cover connect failures, so a
+    request is never sent twice). Idle connections are also kept for 30s
+    instead of httpx's 5s default, so fewer requests need a new connect."""
+
+    def _build_client(self):
+        import httpx
+        kwargs = dict(self._client_kwargs)
+        limits = kwargs.pop("limits")
+        kwargs["transport"] = httpx.AsyncHTTPTransport(
+            retries=2,
+            limits=httpx.Limits(
+                max_connections=limits.max_connections,
+                max_keepalive_connections=limits.max_keepalive_connections,
+                keepalive_expiry=30.0,
+            ),
+            http1=kwargs.get("http1", True),
+            http2=kwargs.get("http2", False),
+        )
+        return httpx.AsyncClient(**kwargs)
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
 # Deduplication: track processed update IDs to skip Telegram retries
@@ -978,11 +1011,13 @@ async def main():
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
-        .connect_timeout(20.0)
-        .read_timeout(20.0)
-        .write_timeout(20.0)
-        .pool_timeout(20.0)
-        .connection_pool_size(8)
+        .request(_RetryingTelegramRequest(
+            connection_pool_size=8,
+            connect_timeout=6.0,
+            read_timeout=20.0,
+            write_timeout=20.0,
+            pool_timeout=20.0,
+        ))
         .build()
     )
     application = app
