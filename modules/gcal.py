@@ -2,6 +2,7 @@
 Setup: set GOOGLE_CALENDAR_CREDENTIALS in .env (path to credentials.json from Google Cloud Console).
 Auth flow is done via the Telegram bot itself — bot sends auth URL, user pastes the code back."""
 
+import asyncio
 import json
 import logging
 import os
@@ -462,7 +463,6 @@ async def run_daily_check(bot) -> None:
     HEALTH_FILE tracks whether he's already been told, so a deliberately
     disconnected calendar doesn't nag every day. A later successful check
     (after he re-connects) re-arms the alert."""
-    import asyncio
     from modules.utils import OWNER_CHAT_ID
 
     status = await asyncio.to_thread(check_connection)

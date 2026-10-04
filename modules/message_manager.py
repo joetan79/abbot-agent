@@ -6,6 +6,7 @@ Telegram API limits:
 - Messages can only be deleted if sent less than 48 hours ago.
 - Bot can delete its own messages + incoming messages in private chats.
 """
+from modules.utils import atomic_write_text
 import json
 import logging
 from datetime import datetime, timedelta
@@ -34,8 +35,7 @@ def _load_json(path, default):
 def _save_json(path, data):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
+        atomic_write_text(path, json.dumps(data, indent=2, default=str))
     except Exception as e:
         logger.error(f"Error saving {path}: {e}")
 

@@ -3,6 +3,36 @@
 import asyncio, os, json, re, logging, time
 from datetime import datetime
 from pathlib import Path
+
+import threading
+import functools
+
+# ABbot now handles chats concurrently and runs Claude calls in worker
+# threads, so two threads can touch the same JSON file at once. Two guards:
+# - atomic writes: write a temp file, then os.replace() it in. Previously a
+#   reader could catch the file mid-write (truncated), fail to parse it,
+#   treat it as {} and then SAVE {} + its one change — wiping e.g. the whole
+#   chat history or memory store.
+# - _FILE_LOCK around every read-modify-write below, so two concurrent
+#   updates can't overwrite each other's change. Each holds it for a few ms.
+_FILE_LOCK = threading.RLock()
+
+
+def _locked(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _FILE_LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+def atomic_write_text(path, text: str) -> None:
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
 import anthropic
 
 logger = logging.getLogger(__name__)
@@ -117,6 +147,7 @@ def categorize_memory(key: str, value: str) -> str:
     return max(scores, key=scores.get)
 
 
+@_locked
 def memory_set_categorized(key: str, value):
     """Save memory with auto-category tagging."""
     mem = _load(MEMORY_FILE)
@@ -290,6 +321,7 @@ DEFAULT_TIME_WINDOWS = {
 }
 
 
+@_locked
 def save_time_window(
         activity: str,
         hours: float,
@@ -346,6 +378,7 @@ def get_all_time_windows() -> dict:
     return {**DEFAULT_TIME_WINDOWS, **custom}
 
 
+@_locked
 def delete_time_window(activity: str) -> bool:
     windows = _load(TIME_WINDOWS_FILE)
     key = activity.lower().strip()
@@ -362,8 +395,9 @@ def _load(path: Path) -> dict:
         return {}
 
 def _save(path: Path, data: dict):
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
 
+@_locked
 def memory_set(key: str, value):
     """Save memory with auto-categorization."""
     mem = _load(MEMORY_FILE)
@@ -395,6 +429,7 @@ def memory_all() -> dict:
             result[k] = v
     return result
 
+@_locked
 def memory_delete(key: str):
     mem = _load(MEMORY_FILE)
     mem.pop(key, None)
@@ -436,6 +471,7 @@ def memory_get_all_categorized() -> dict:
         categorized[cat][key] = value
     return categorized
 
+@_locked
 def preference_set(key: str, value: str):
     """Store a long-term preference that persists and is always injected into prompts."""
     prefs = _load(PREFERENCES_FILE)
@@ -540,6 +576,7 @@ def schedule_next_id() -> str:
     numeric_ids = [int(k) for k in jobs if k.isdigit()]
     return str(max(numeric_ids, default=100) + 1)
 
+@_locked
 def schedule_save(job_id: str, data: dict):
     jobs = _load(SCHEDULE_FILE)
     jobs[job_id] = data
@@ -548,11 +585,13 @@ def schedule_save(job_id: str, data: dict):
 def schedule_load_all() -> dict:
     return _load(SCHEDULE_FILE)
 
+@_locked
 def schedule_delete(job_id: str):
     jobs = _load(SCHEDULE_FILE)
     jobs.pop(job_id, None)
     _save(SCHEDULE_FILE, jobs)
 
+@_locked
 def schedule_pause(job_id: str) -> bool:
     jobs = _load(SCHEDULE_FILE)
     if job_id not in jobs:
@@ -561,6 +600,7 @@ def schedule_pause(job_id: str) -> bool:
     _save(SCHEDULE_FILE, jobs)
     return True
 
+@_locked
 def schedule_resume(job_id: str) -> bool:
     jobs = _load(SCHEDULE_FILE)
     if job_id not in jobs:
@@ -569,6 +609,7 @@ def schedule_resume(job_id: str) -> bool:
     _save(SCHEDULE_FILE, jobs)
     return True
 
+@_locked
 def task_add(text: str) -> str:
     tasks = _load(TASKS_FILE)
     tid = str(int(datetime.now().timestamp()))
@@ -576,6 +617,7 @@ def task_add(text: str) -> str:
     _save(TASKS_FILE, tasks)
     return tid
 
+@_locked
 def task_done(tid: str) -> bool:
     tasks = _load(TASKS_FILE)
     if tid in tasks:
@@ -590,6 +632,7 @@ def task_list(show_done=False) -> list:
     result = [{"id": k, **v} for k, v in tasks.items() if show_done or not v["done"]]
     return sorted(result, key=lambda x: x["created"])
 
+@_locked
 def task_delete(tid: str) -> bool:
     tasks = _load(TASKS_FILE)
     if tid in tasks:
@@ -665,6 +708,7 @@ async def handle_photo(bot, photos: list, caption: str = "") -> str:
         return "Sorry, I couldn't process that image. Please try again."
 
 
+@_locked
 def photo_cache_set(message_id: int, file_id: str, scope: str = "study"):
     """`scope` picks which skills a later reply-triggered re-analysis loads
     (see handle_photo_reanalysis) — "study" for homework/general photos,
@@ -743,6 +787,7 @@ async def handle_photo_reanalysis(bot, file_id: str, user_question: str, scope: 
 HISTORY_FILE = DATA_DIR / "history.json"
 MAX_HISTORY  = 50  # messages per user
 
+@_locked
 def history_add(user_id: str, role: str, content: str):
     """Add a message to conversation history."""
     history = _load(HISTORY_FILE)
@@ -768,6 +813,7 @@ def history_get(user_id: str, limit: int = 20) -> list:
         for m in messages[-limit:]
     ]
 
+@_locked
 def history_clear(user_id: str):
     """Clear conversation history for a user."""
     history = _load(HISTORY_FILE)
@@ -1032,6 +1078,7 @@ def get_cached_news(cache_key: str, max_age_hours: int = 6) -> str | None:
     return None
 
 
+@_locked
 def set_cached_news(cache_key: str, content: str):
     cache = _load(CACHE_FILE)
     cache[cache_key] = {
@@ -1057,10 +1104,11 @@ def _increment_article_stats():
             stats = {"total_ever": 443}  # seed with known baseline
         stats["total_ever"] = stats.get("total_ever", 443) + 1
         stats["last_updated"] = datetime.now().isoformat()
-        ARTICLE_STATS_FILE.write_text(json.dumps(stats, indent=2))
+        atomic_write_text(ARTICLE_STATS_FILE, json.dumps(stats, indent=2))
     except Exception as e:
         logger.warning(f"Could not update article_stats.json: {e}")
 
+@_locked
 def mark_article_published(url: str, title: str,
                             pub_date: str = ""):
     """Mark article as published so it won't repeat."""
@@ -1079,6 +1127,7 @@ def get_published_count() -> int:
     """Get count of published articles."""
     return len(_load(PUBLISHED_ARTICLES_FILE))
 
+@_locked
 def clear_old_published(days: int = 14):
     """Clear articles older than X days, and those missing marked_at."""
     import datetime as dt

@@ -45,6 +45,41 @@ logger = logging.getLogger(__name__)
 from telegram.request import HTTPXRequest
 
 
+from telegram.ext import BaseUpdateProcessor
+
+
+class _PerChatUpdateProcessor(BaseUpdateProcessor):
+    """Different chats are handled concurrently; messages within ONE chat are
+    still handled strictly in order.
+
+    python-telegram-bot's default handles ALL updates one at a time, so while
+    ABbot was answering Isaac in a group, Joe's private message just waited
+    (and vice versa). Fully concurrent updates would fix that but could let
+    two quick messages in the same chat race each other (e.g. a reply to a
+    pending calendar question overtaking the question's own handling), so
+    each chat gets its own lock instead."""
+
+    def __init__(self, max_concurrent_updates: int = 64):
+        super().__init__(max_concurrent_updates)
+        self._chat_locks: dict = {}
+
+    async def do_process_update(self, update, coroutine) -> None:
+        chat = getattr(update, "effective_chat", None)
+        key = chat.id if chat else None
+        if key is None:
+            await coroutine
+            return
+        lock = self._chat_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            await coroutine
+
+    async def initialize(self) -> None:
+        pass
+
+    async def shutdown(self) -> None:
+        pass
+
+
 class _RetryingTelegramRequest(HTTPXRequest):
     """Bot API requests (not getUpdates polling) with connect retries.
 
@@ -267,7 +302,7 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Use the recent group conversation above (if any) to give context-aware replies."
         )
         await msg.chat.send_action("typing")
-        reply = ask_claude_with_history(system, full_context, user_id, model=MODEL_SMART, history_text=text)
+        reply = (await asyncio.to_thread(ask_claude_with_history, system, full_context, user_id, model=MODEL_SMART, history_text=text))
         await msg.reply_text(reply)
 
         # Log interaction for daily family digest
@@ -734,7 +769,7 @@ async def cmd_feedhealth(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.chat.send_action("typing")
     from modules.rssfeed import check_feed_health
-    health = check_feed_health()
+    health = (await asyncio.to_thread(check_feed_health))
     ok = sum(1 for v in health.values() if v["status"] == "ok")
     empty = sum(1 for v in health.values() if v["status"] == "empty")
     error = sum(1 for v in health.values() if v["status"] == "error")
@@ -1042,10 +1077,16 @@ async def main():
             write_timeout=20.0,
             pool_timeout=20.0,
         ))
+        .concurrent_updates(_PerChatUpdateProcessor())
         .build()
     )
     application = app
-    scheduler = AsyncIOScheduler()
+    # misfire_grace_time: APScheduler's default is 1s — a job delayed longer
+    # than that is silently SKIPPED. A slow job blocking the event loop (e.g.
+    # the 18:00 AI-news report, ~23s) made the 18:00 water report get skipped
+    # on 2026-10-04 ("was missed by 0:00:23"). Allow up to 10 minutes late;
+    # coalesce so a backlog of the same job runs once, not N times.
+    scheduler = AsyncIOScheduler(job_defaults={"misfire_grace_time": 600, "coalesce": True})
     app.bot_data["scheduler"] = scheduler
     restore_schedules(scheduler, app.bot)
     restore_reminders(scheduler, app.bot)

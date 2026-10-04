@@ -1,6 +1,7 @@
 """Cross-chat insights: log family member interactions, send daily + weekly
 digests to Joe."""
 
+from modules.utils import atomic_write_text
 import asyncio
 import json
 import logging
@@ -20,7 +21,7 @@ def _load() -> list:
 
 
 def _save(data: list):
-    _INSIGHTS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    atomic_write_text(_INSIGHTS_FILE, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def log_interaction(member_name: str, question: str, bot_reply: str):
@@ -78,12 +79,13 @@ async def send_daily_digest(bot):
     )
 
     try:
-        summary = ask_claude(
+        summary = (await asyncio.to_thread(
+                      ask_claude,
             "You are a helpful family assistant summarising children's learning activity.",
             prompt,
             max_tokens=350,
-            model=MODEL_FAST,
-        )
+            model=MODEL_FAST
+                  ))
         date_str = datetime.now().strftime("%d %b")
         await bot.send_message(
             chat_id=OWNER_CHAT_ID,

@@ -11,6 +11,7 @@
   older entries are pruned automatically.
 """
 
+from modules.utils import atomic_write_text
 import asyncio
 import json
 import logging
@@ -43,7 +44,7 @@ def _load() -> list:
 
 
 def _save(entries: list) -> None:
-    WATER_FILE.write_text(json.dumps({"entries": entries}, ensure_ascii=False, indent=2))
+    atomic_write_text(WATER_FILE, json.dumps({"entries": entries}, ensure_ascii=False, indent=2))
 
 
 def _prune(entries: list) -> list:

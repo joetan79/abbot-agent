@@ -2,6 +2,7 @@
 Sends one consolidated morning message: weather, crypto, news headlines,
 tasks, reminders, calendar events, and a focus suggestion."""
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -22,11 +23,12 @@ async def send_morning_briefing(bot):
 
     # ── Weather ───────────────────────────────────────────────────────────────
     try:
-        weather = ask_claude_with_search(
+        weather = (await asyncio.to_thread(
+                      ask_claude_with_search,
             "You are a concise weather reporter. Use Celsius only. Max 3 lines.",
             f"current weather {city} today temperature celsius humidity",
-            max_tokens=120, model=MODEL_FAST,
-        )
+            max_tokens=120, model=MODEL_FAST
+                  ))
         sections.append(f"🌤 *Weather ({city}):*\n{weather.strip()}")
     except Exception as e:
         logger.error(f"[Briefing] Weather failed: {e}")
@@ -34,7 +36,7 @@ async def send_morning_briefing(bot):
     # ── Crypto ────────────────────────────────────────────────────────────────
     try:
         from modules.coingecko import get_prices
-        prices = get_prices(["bitcoin", "ethereum", "solana"])
+        prices = (await asyncio.to_thread(get_prices, ["bitcoin", "ethereum", "solana"]))
         if prices:
             lines = []
             symbols = {"bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL"}
@@ -52,7 +54,7 @@ async def send_morning_briefing(bot):
     try:
         from modules.rssfeed import fetch_ai_news
         from modules.news_pref import rank_articles
-        articles = fetch_ai_news(hours=10, count=8)
+        articles = (await asyncio.to_thread(fetch_ai_news, hours=10, count=8))
         articles = rank_articles(articles)[:3]
         if articles:
             headlines = "\n".join(
@@ -92,7 +94,7 @@ async def send_morning_briefing(bot):
     try:
         from modules.gcal import is_connected, get_today_events
         if is_connected():
-            events = get_today_events()
+            events = (await asyncio.to_thread(get_today_events))
             if events:
                 ev_lines = "\n".join(
                     f"  • {e['time']} {e['title'][:50]}" for e in events[:5]
@@ -130,10 +132,11 @@ async def send_morning_briefing(bot):
             "Base it on his patterns, pending work, or goals. "
             "2 sentences max, practical, actionable. Start with 💡"
         )
-        focus = ask_claude(
+        focus = (await asyncio.to_thread(
+                    ask_claude,
             "You are Joe's AI daily planner. Be specific and practical.",
             focus_prompt, model=MODEL_FAST, max_tokens=100
-        )
+                ))
         sections.append(focus.strip())
     except Exception as e:
         logger.error(f"[Briefing] Focus failed: {e}")

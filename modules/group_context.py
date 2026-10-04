@@ -1,5 +1,6 @@
 """Per-chat conversation thread buffer for group context awareness."""
 
+from modules.utils import atomic_write_text
 import json
 import logging
 from datetime import datetime, timedelta
@@ -20,7 +21,7 @@ def _load() -> dict:
 
 
 def _save(data: dict):
-    _CONTEXT_FILE.write_text(json.dumps(data, ensure_ascii=False))
+    atomic_write_text(_CONTEXT_FILE, json.dumps(data, ensure_ascii=False))
 
 
 def record_message(chat_id: int, sender_name: str, text: str):

@@ -1,5 +1,6 @@
 """Agent self-monitoring: real-time error alerts + weekly log analysis."""
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timedelta
@@ -105,7 +106,7 @@ async def run_weekly_analysis(bot):
     # Compress episodic memory first (once per week)
     try:
         from modules.episodic_memory import compress_week
-        compress_week()
+        (await asyncio.to_thread(compress_week))
     except Exception as e:
         logger.error(f"[Health] Episodic compression failed: {e}")
     now_str = datetime.now().strftime("%Y-%m-%d")
@@ -127,10 +128,11 @@ async def run_weekly_analysis(bot):
             "Keep the response concise — under 250 words. Use plain text, no markdown."
         )
         try:
-            analysis = ask_claude(
+            analysis = (await asyncio.to_thread(
+                           ask_claude,
                 "You are a helpful bot health analyst. Be concise and practical.",
-                prompt, max_tokens=400, model=MODEL_FAST,
-            )
+                prompt, max_tokens=400, model=MODEL_FAST
+                       ))
             sections.append(f"🔧 Health:\n{analysis}")
         except Exception as e:
             sections.append(f"🔧 Health: Analysis failed ({e})")

@@ -187,10 +187,11 @@ async def check_and_prompt_web_learning(bot, chat_id: int, reply: str, query: st
             "If yes: reply with just the fact in one sentence starting with SAVE:\n"
             "If no: reply exactly: NONE"
         )
-        result = ask_claude(
+        result = (await asyncio.to_thread(
+                     ask_claude,
             "You identify user-specific facts worth remembering.",
             prompt, model=MODEL_FAST, max_tokens=80
-        )
+                 ))
         result = result.strip()
         if not result or result.startswith("NONE") or "NONE" in result[:10]:
             return

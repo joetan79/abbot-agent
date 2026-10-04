@@ -297,7 +297,7 @@ async def send_quiz(bot, quiz_type):
 
     if quiz_type == "ai":
         for _ in range(count):
-            quiz_data = generate_ai_quiz(recent_topics=recent_topics)
+            quiz_data = (await asyncio.to_thread(generate_ai_quiz, recent_topics=recent_topics))
             if quiz_data:
                 quiz_data["type"] = "mcq"
                 questions.append(quiz_data)
@@ -307,12 +307,12 @@ async def send_quiz(bot, quiz_type):
         state[quiz_key]["day_counter"] = day_counter + 1
         for _ in range(count):
             if batch_type == "coding":
-                quiz_data = generate_python_coding(recent_topics=recent_topics)
+                quiz_data = (await asyncio.to_thread(generate_python_coding, recent_topics=recent_topics))
                 if quiz_data:
                     quiz_data["type"] = "coding"
                     questions.append(quiz_data)
             else:
-                quiz_data = generate_python_mcq(recent_topics=recent_topics)
+                quiz_data = (await asyncio.to_thread(generate_python_mcq, recent_topics=recent_topics))
                 if quiz_data:
                     quiz_data["type"] = "mcq"
                     questions.append(quiz_data)

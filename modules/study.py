@@ -1,5 +1,6 @@
 """Study handlers for student users."""
 
+import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 from .utils import ask_claude, ask_claude_with_search, is_allowed, MODEL_SMART
@@ -72,7 +73,7 @@ async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Answer clearly with real world examples."
     )
     await update.message.chat.send_action("typing")
-    await update.message.reply_text(ask_claude_with_search(sys, q, model=MODEL_SMART))
+    await update.message.reply_text((await asyncio.to_thread(ask_claude_with_search, sys, q, model=MODEL_SMART)))
 
 async def cmd_math(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return
@@ -89,7 +90,7 @@ async def cmd_math(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.chat.send_action("typing")
     await update.message.reply_text(
-        f"➕ *Math Solution*\n\n{ask_claude(sys, f'Solve: {p}', model=MODEL_SMART)}", parse_mode=None)
+        f"➕ *Math Solution*\n\n{(await asyncio.to_thread(ask_claude, sys, f'Solve: {p}', model=MODEL_SMART))}", parse_mode=None)
 
 async def cmd_chinese(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return
@@ -105,7 +106,7 @@ async def cmd_chinese(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.chat.send_action("typing")
     await update.message.reply_text(
-        f"🀄 *Chinese Helper*\n\n{ask_claude(sys, t, model=MODEL_SMART)}", parse_mode=None)
+        f"🀄 *Chinese Helper*\n\n{(await asyncio.to_thread(ask_claude, sys, t, model=MODEL_SMART))}", parse_mode=None)
 
 async def cmd_homework(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_chat.id): return
@@ -121,4 +122,4 @@ async def cmd_homework(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.chat.send_action("typing")
     await update.message.reply_text(
-        f"📝 *Homework Help*\n\n{ask_claude(sys, q, model=MODEL_SMART)}", parse_mode=None)
+        f"📝 *Homework Help*\n\n{(await asyncio.to_thread(ask_claude, sys, q, model=MODEL_SMART))}", parse_mode=None)

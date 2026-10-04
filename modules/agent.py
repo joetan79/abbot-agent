@@ -809,7 +809,8 @@ async def run_scheduled_job(bot, job_id: str, action: str):
             f"temperature celsius humidity wind"
         )
 
-        msg = ask_claude_with_search(
+        msg = await asyncio.to_thread(
+            ask_claude_with_search,
             system,
             search_query,
             max_tokens=500,
@@ -832,7 +833,9 @@ async def run_scheduled_job(bot, job_id: str, action: str):
                 if re.search(r'\d+', time_period) else 24
 
         # Fetch fresh news from NewsAPI
-        news_articles = fetch_ai_news(hours=hours, count=5)
+        # Threaded: reading every RSS feed takes ~20s+ and used to freeze the
+        # whole bot — on 2026-10-04 it made the 18:00 water report miss its slot.
+        news_articles = await asyncio.to_thread(fetch_ai_news, hours=hours, count=5)
 
         for i, a in enumerate(news_articles, 1):
             logger.info(
@@ -882,7 +885,8 @@ async def run_scheduled_job(bot, job_id: str, action: str):
                 website_url = os.environ.get("WEBSITE_URL", "http://localhost:8000")
                 api_key = os.environ.get("WEBSITE_API_KEY", "")
 
-                response = httpx.post(
+                response = await asyncio.to_thread(
+                    httpx.post,
                     f"{website_url}/api/publish",
                     json={"articles": articles},
                     headers={
@@ -923,7 +927,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
                 "Format: '1. TITLE\nSummary (2 sentences max).\nSource: URL\n\n' "
                 "Plain text only. No markdown. No intro text."
             )
-            msg = ask_claude_news(system, f"Top 5 world news today {now}", max_tokens=2000)
+            msg = await asyncio.to_thread(ask_claude_news, system, f"Top 5 world news today {now}", max_tokens=2000)
             msg = clean_response(msg)
             set_cached_news(cache_key, msg)
 
@@ -931,7 +935,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
 
     elif "xfeed" in action or "x_feed" in action or "x feed" in action:
         from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published, parse_claude_news_response, get_xfeed_search_prompt
-        import asyncio, httpx, os
+        import httpx, os  # asyncio: module-level import (a local one would shadow it for the whole function)
         posts = await asyncio.to_thread(fetch_x_posts, 24, 10)
         if not posts:
             logger.info("xfeed scheduled: RSSHub failed, trying Claude web search fallback")
@@ -1006,7 +1010,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
             "Format as clean table. "
             "Add data timestamp at the bottom showing when price was fetched."
         )
-        msg = ask_claude_news(system, f"BTC ETH SOL live price USD right now {datetime.now().strftime('%B %d %Y %H:%M')}")
+        msg = await asyncio.to_thread(ask_claude_news, system, f"BTC ETH SOL live price USD right now {datetime.now().strftime('%B %d %Y %H:%M')}")
         msg = clean_response(msg)
         text = f"Crypto Snapshot\n\n{msg}"
 
@@ -1045,7 +1049,8 @@ async def run_scheduled_job(bot, job_id: str, action: str):
             "Search for today's top news headline and weather briefly. "
             "Then give a motivating morning briefing covering tasks and schedule."
         )
-        msg = ask_claude_with_search(
+        msg = await asyncio.to_thread(
+            ask_claude_with_search,
             system,
             f"Today: {now}\nPending tasks:\n{pending}\nSchedules:\n{sched_list}\n"
             "Give morning briefing with live news and weather.",
@@ -1072,7 +1077,7 @@ async def run_scheduled_job(bot, job_id: str, action: str):
             "Use web search if needed to get current/live information. "
             "Be concise and accurate."
         )
-        msg = ask_claude_with_search(system, action, model=MODEL_FAST)
+        msg = await asyncio.to_thread(ask_claude_with_search, system, action, model=MODEL_FAST)
         msg = clean_response(msg)
         text = f"ABbot Report\n\n{msg}"
 
@@ -1667,7 +1672,7 @@ async def _is_reply_related(prior_question: str, reply_text: str) -> bool:
     )
     schema = {"type": "object", "properties": {"related": {"type": "boolean"}},
               "required": ["related"], "additionalProperties": False}
-    raw = ask_claude(system, reply_text, max_tokens=50, model=MODEL_FAST, schema=schema)
+    raw = (await asyncio.to_thread(ask_claude, system, reply_text, max_tokens=50, model=MODEL_FAST, schema=schema))
     try:
         result = json.loads(raw)
         return bool(result.get("related", True))
@@ -1709,7 +1714,7 @@ async def _resolve_gcal_add_clarification(partial_data: dict, reply_text: str):
         '{"related":false}\n'
         "Return ONLY the JSON object, no markdown, no explanation."
     )
-    raw = ask_claude(system, reply_text, max_tokens=200, model=MODEL_FAST)
+    raw = (await asyncio.to_thread(ask_claude, system, reply_text, max_tokens=200, model=MODEL_FAST))
     try:
         result = json.loads(raw.strip().strip("```json").strip("```").strip())
     except Exception:
@@ -1785,7 +1790,7 @@ async def _gcal_add_from_intent(intent_data: dict) -> str:
     if all_day:
         # Recurring all-day events aren't supported — a rare combo, and the
         # clarification flow that sets all_day only ever fills in a single event.
-        if add_event(title, all_day_date=start_date, color=color):
+        if (await asyncio.to_thread(add_event, title, all_day_date=start_date, color=color)):
             return f"✅ Added to calendar (all day): *{title}*\n{start_date.strftime('%a %d %b')}"
         return "❌ Failed to add event. Check calendar connection."
 
@@ -1796,10 +1801,11 @@ async def _gcal_add_from_intent(intent_data: dict) -> str:
     if recur_days and end_date_str:
         end_date = _parse_date(end_date_str)
         recur_days_clean = [d.strip().lower() for d in recur_days]
-        count = add_recurring_event(
+        count = (await asyncio.to_thread(
+                    add_recurring_event,
             title, start_date, end_date,
-            recur_days_clean, (sh, sm), (eh, em), color=color,
-        )
+            recur_days_clean, (sh, sm), (eh, em), color=color
+                ))
         if count >= 0:
             days_label = " & ".join(d.capitalize() for d in recur_days_clean)
             return (
@@ -1822,7 +1828,7 @@ async def _gcal_add_from_intent(intent_data: dict) -> str:
     end_dt = _tz.localize(datetime(end_date.year, end_date.month, end_date.day, eh, em, 0))
     if end_dt <= start_dt:
         end_dt += timedelta(days=1)
-    if add_event(title, start_dt, end_dt, color=color):
+    if (await asyncio.to_thread(add_event, title, start_dt, end_dt, color=color)):
         next_day = " (+1 day)" if end_dt.date() != start_dt.date() else ""
         return (
             f"✅ Added to calendar: *{title}*\n"
@@ -1949,7 +1955,7 @@ async def _gcal_modify_from_intent(intent_data: dict, context) -> dict:
     if not search_title:
         return {"status": "missing_title"}
 
-    events = find_events_by_title(search_title)
+    events = (await asyncio.to_thread(find_events_by_title, search_title))
     if not events:
         return {"status": "no_events", "text": f"No upcoming events found matching '{search_title}'. Check the title and try again."}
 
@@ -2005,7 +2011,7 @@ async def _gcal_modify_from_intent(intent_data: dict, context) -> dict:
         return {"status": "multi_match", "text": "\n".join(lines)}
 
     event = events[0]
-    if modify_event(event["id"], updates):
+    if (await asyncio.to_thread(modify_event, event["id"], updates)):
         changes = []
         if "start_time" in updates:
             h, m = updates["start_time"]
@@ -2058,7 +2064,7 @@ async def _resolve_gcal_modify_update(reply_text: str):
         "If the reply is clearly unrelated, return {\"related\":false}.\n"
         "Return ONLY the JSON object, no markdown, no explanation."
     )
-    raw = ask_claude(system, reply_text, max_tokens=150, model=MODEL_FAST)
+    raw = (await asyncio.to_thread(ask_claude, system, reply_text, max_tokens=150, model=MODEL_FAST))
     try:
         result = json.loads(raw.strip().strip("```json").strip("```").strip())
     except Exception:
@@ -2160,7 +2166,7 @@ async def _resolve_reminder_time_clarification(reply_text: str):
         "If the reply is clearly unrelated, return {\"related\":false}.\n"
         "Return ONLY the JSON object, no markdown, no explanation."
     )
-    raw = ask_claude(system, reply_text, max_tokens=150, model=MODEL_FAST)
+    raw = (await asyncio.to_thread(ask_claude, system, reply_text, max_tokens=150, model=MODEL_FAST))
     try:
         result = json.loads(raw.strip().strip("```json").strip("```").strip())
     except Exception:
@@ -2385,7 +2391,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         from modules.gcal import complete_auth
         m = re.match(r'^calendar code:\s*(.+)$', _stripped, re.IGNORECASE)
         code = m.group(1).strip() if m else _stripped
-        if complete_auth(code):
+        if (await asyncio.to_thread(complete_auth, code)):
             await update.message.reply_text("✅ Google Calendar connected! Say 'what's on my calendar today' to check.")
         else:
             await update.message.reply_text("❌ Auth failed — make sure you copied the full code and try 'connect google calendar' again.")
@@ -2451,7 +2457,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # ──────────────────────────────────────────
 
     # ── ACTIVITY COMPLETION DETECTION ─────────
-    activity_info = detect_activity_completion(text)
+    activity_info = (await asyncio.to_thread(detect_activity_completion, text))
     if activity_info:
         await handle_activity_reminder(
             update, context, activity_info)
@@ -2459,7 +2465,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # ──────────────────────────────────────────
 
     # ── INTENT PARSE (early — used by quiz intercept below) ──────────────────
-    _early_intent_data = parse_intent(text)
+    _early_intent_data = (await asyncio.to_thread(parse_intent, text))
     _early_intent = _early_intent_data.get("intent", "chat")
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -2658,7 +2664,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "Be specific about what will be sent at what time."
         )
         await update.message.chat.send_action("typing")
-        reply = ask_claude_with_history(system, full_prompt, user_id, model=MODEL_FAST)
+        reply = (await asyncio.to_thread(ask_claude_with_history, system, full_prompt, user_id, model=MODEL_FAST))
         await update.message.reply_text(reply)
 
     elif intent == "schedule_remove":
@@ -2979,7 +2985,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if not is_explicit:
             user_id = str(update.effective_user.id)
             system = build_owner_system_prompt(user_id, text)
-            reply = ask_claude_with_history(system, text, user_id, model=MODEL_SMART)
+            reply = (await asyncio.to_thread(ask_claude_with_history, system, text, user_id, model=MODEL_SMART))
             await update.message.reply_text(reply)
         else:
             await update.message.chat.send_action("typing")
@@ -3082,12 +3088,13 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                              "properties": {"cities": {"type": "array", "items": {"type": "string"}}},
                              "required": ["cities"], "additionalProperties": False}
             try:
-                raw = ask_claude(
+                raw = (await asyncio.to_thread(
+                          ask_claude,
                     extract_system, text,
                     max_tokens=100,
                     model=MODEL_FAST,
-                    schema=cities_schema,
-                )
+                    schema=cities_schema
+                      ))
                 cities_mentioned = json.loads(raw)["cities"]
                 if not isinstance(cities_mentioned, list):
                     cities_mentioned = []
@@ -3106,12 +3113,13 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     f"Keep concise — max 6 lines. "
                     f"Date/time: {now_str}."
                 )
-                msg = ask_claude_with_search(
+                msg = (await asyncio.to_thread(
+                          ask_claude_with_search,
                     system,
                     f"current weather {city} today celsius humidity wind",
                     max_tokens=300,
-                    model=MODEL_FAST,
-                )
+                    model=MODEL_FAST
+                      ))
                 msg = clean_response(msg)
                 all_reports.append(f"{city}\n{msg}")
             combined = "\n\n─────────────\n\n".join(all_reports)
@@ -3132,12 +3140,13 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"Follow user preferences exactly."
             )
             await update.message.chat.send_action("typing")
-            msg = ask_claude_with_search(
+            msg = (await asyncio.to_thread(
+                      ask_claude_with_search,
                 system,
                 f"current weather {job_city} today celsius humidity wind dew point",
                 max_tokens=600,
-                model=MODEL_FAST,
-            )
+                model=MODEL_FAST
+                  ))
             msg = clean_response(msg)
             await update.message.reply_text(
                 f"Weather Report — {job_city}\n\n{msg}"
@@ -3258,7 +3267,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if not code:
             await update.message.reply_text("Paste the code like: `calendar code: 4/0Adeu5...`", parse_mode="Markdown")
             return
-        if complete_auth(code):
+        if (await asyncio.to_thread(complete_auth, code)):
             await update.message.reply_text("✅ Google Calendar connected! Say 'what's on my calendar today' to check.")
         else:
             await update.message.reply_text("❌ Auth failed — make sure you copied the full code.")
@@ -3268,7 +3277,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if not is_connected():
             await update.message.reply_text("Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate.")
             return
-        events = get_today_events()
+        events = (await asyncio.to_thread(get_today_events))
         if not events:
             await update.message.reply_text("📅 No events on your calendar today.")
         else:
@@ -3283,7 +3292,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if not is_connected():
             await update.message.reply_text("Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate.")
             return
-        events = get_week_events()
+        events = (await asyncio.to_thread(get_week_events))
         if not events:
             await update.message.reply_text("📅 No upcoming events this week.")
         else:
@@ -3360,7 +3369,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # Fetch events based on scope
         scope = (intent_data.get("action") or "week").lower()
         if "today" in scope:
-            events = get_today_events()
+            events = (await asyncio.to_thread(get_today_events))
             # get_today_events returns {time, title} — need datetime
             _tz = _pytz.timezone("Asia/Macau")
             _today = datetime.now(_tz).date()
@@ -3373,7 +3382,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 except Exception:
                     pass
         else:
-            raw_events = get_week_events()
+            raw_events = (await asyncio.to_thread(get_week_events))
             rich_events = []
             for e in raw_events:
                 try:
@@ -3461,7 +3470,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         episodic = get_episodic_context()
         cal_text = ""
         if is_connected():
-            events = get_today_events()
+            events = (await asyncio.to_thread(get_today_events))
             if events:
                 cal_text = "Calendar today:\n" + "\n".join(f"- {e['time']} {e['title']}" for e in events)
         import pytz as _pytz
@@ -3476,10 +3485,11 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "3. Any goal streaks at risk today\n"
             "Be specific and actionable. Max 200 words."
         )
-        plan = ask_claude_with_history(
+        plan = (await asyncio.to_thread(
+                   ask_claude_with_history,
             build_owner_system_prompt(user_id, text),
             plan_prompt, user_id, model=MODEL_SMART
-        )
+               ))
         await update.message.reply_text(plan)
 
     elif intent == "episodic_memory":
@@ -3682,21 +3692,23 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             )
 
         if needs_search:
-            reply = ask_claude_with_search(
+            reply = (await asyncio.to_thread(
+                        ask_claude_with_search,
                 system,
                 text_for_context,
                 user_id,
                 model=MODEL_SMART,
-                history_text=original_text,
-            )
+                history_text=original_text
+                    ))
         else:
-            reply = ask_claude_with_history(
+            reply = (await asyncio.to_thread(
+                        ask_claude_with_history,
                 system,
                 text_for_context,
                 user_id,
                 model=MODEL_SMART,
-                history_text=original_text,
-            )
+                history_text=original_text
+                    ))
 
         from modules.message_manager import track_bot_message, MAX_DELETE_AGE_HOURS
         chat_id = update.effective_chat.id
@@ -3721,7 +3733,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             from modules.learner import increment_msg_counter, should_suggest, generate_proactive_suggestion, log_learning
             log_learning(original_text[:300], "conversation")
             if should_suggest():
-                _sugg = generate_proactive_suggestion(user_id, original_text)
+                _sugg = (await asyncio.to_thread(generate_proactive_suggestion, user_id, original_text))
                 if _sugg:
                     await asyncio.sleep(0.8)
                     await update.effective_chat.send_message(_sugg)
@@ -3877,7 +3889,7 @@ async def cmd_xfeed(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await update.message.reply_text(f"🐦 Fetching AI Pulse... (last {hours}h, up to {count} posts)")
     try:
-        import asyncio, httpx, os, json
+        import httpx, os, json  # asyncio: module-level import
         from modules.xfeed import fetch_x_posts, format_x_posts_for_telegram, mark_x_posts_published
         from modules.utils import ask_claude_with_search
 
