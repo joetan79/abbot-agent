@@ -1025,6 +1025,16 @@ async def run_scheduled_job(bot, job_id: str, action: str):
         await send_weekly_family_digest(bot)
         return
 
+    elif action == "water_daily_report":
+        from modules.water_tracker import send_daily_report
+        await send_daily_report(bot)
+        return
+
+    elif action == "water_3day_report":
+        from modules.water_tracker import send_3day_report
+        await send_3day_report(bot)
+        return
+
     elif action == "daily_report":
         tasks    = task_list()
         pending  = "\n".join(f"- {t['text']}" for t in tasks) or "No pending tasks"

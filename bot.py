@@ -15,6 +15,7 @@ from telegram.ext import (
 from modules.utils import handle_photo, photo_cache_set, history_add
 from modules import gmail_monitor
 from modules import gout_tracker
+from modules import water_tracker
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -208,6 +209,12 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             record_message(chat_id, sender_name, text)
 
         if is_owner(sender_id):
+            # Water log: "w250" / "w250 咖啡" / "w-250" (correction). Handled
+            # directly — never sent to the intent classifier.
+            water_cmd = water_tracker.parse_command(text)
+            if water_cmd:
+                await msg.reply_text(water_tracker.log_water(*water_cmd))
+                return
             # Pasted Google OAuth redirect URL (http://localhost/?...code=...) —
             # handled directly rather than trusting the intent classifier to
             # pick the code out of a long URL.
@@ -621,6 +628,23 @@ async def _process_photo_batch(bot, chat_id: int, photos: list, caption: str, is
     # screenshot) — checked before the food keywords so e.g. "add dinner
     # with Tom to calendar" isn't logged as a meal. Without this, calendar
     # photos fell into the generic vision reply below and nothing was added.
+    # Water: caption "w" (or "w 咖啡") → estimate the volume only, no logging
+    # (Joe's choice). A caption that is itself a log command ("w250") logs it.
+    if is_owner_sender and water_tracker.is_estimate_caption(caption):
+        logger.info(f"DEBUG photo batch caption={caption!r} n_photos={len(photos)} -> water estimate")
+        try:
+            reply = await water_tracker.estimate_from_photos(bot, photos, caption)
+        except Exception as e:
+            logger.error(f"[Water] estimate failed: {e}")
+            reply = "❌ 估算失敗，請再試一次。Sorry, the estimate failed — please try again."
+        await reply_msg.reply_text(reply)
+        if reply_msg.from_user:
+            _photo_history_add(reply_msg.from_user.id, len(photos), caption, reply)
+        return
+    if is_owner_sender and water_tracker.parse_command(caption):
+        await reply_msg.reply_text(water_tracker.log_water(*water_tracker.parse_command(caption)))
+        return
+
     if is_owner_sender and is_calendar_add_text(caption):
         logger.info(f"DEBUG photo batch caption={caption!r} n_photos={len(photos)} -> calendar")
         await _reply_calendar_from_photos(bot, photos, caption, reply_msg)
