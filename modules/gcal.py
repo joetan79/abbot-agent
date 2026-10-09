@@ -228,8 +228,11 @@ def add_event(
     description: str = "",
     color: str = None,
     all_day_date=None,
+    recurrence: list = None,
 ) -> bool:
-    """Pass all_day_date (a date, not datetime) for a no-specific-time event
+    """`recurrence`: optional list of RRULE strings (see build_rrule) to make
+    the event repeat, e.g. ["RRULE:FREQ=MONTHLY;BYMONTHDAY=13"].
+    Pass all_day_date (a date, not datetime) for a no-specific-time event
     (e.g. Joe says "whole day"/"all day") — start_dt/end_dt are ignored then.
     Google represents all-day events with date-only start/end and an
     exclusive end date (end = start + 1 day), no timeZone field."""
@@ -256,11 +259,35 @@ def add_event(
         color_id = _resolve_color_id(color)
         if color_id:
             event["colorId"] = color_id
+        if recurrence:
+            event["recurrence"] = recurrence
         svc.events().insert(calendarId="primary", body=event).execute()
         return True
     except Exception as e:
         logger.error(f"[GCal] add_event failed: {e}")
         return False
+
+
+def build_rrule(repeat: str, start_date, end_date=None, days_of_week: list = None) -> str | None:
+    """RRULE for a repeating event. repeat: "daily", "weekly", "monthly" or
+    "yearly". Monthly repeats on the start date's day of the month, yearly on
+    its month+day. days_of_week (weekday names) only applies to weekly. With
+    no end_date the event repeats with no end. Returns None for an unknown
+    repeat value. Previously ABbot could only build weekly rules, so "every
+    month on the 13th" silently became a one-off event (2026-10-09)."""
+    repeat = (repeat or "").strip().lower()
+    until = f";UNTIL={end_date.strftime('%Y%m%dT235959Z')}" if end_date else ""
+    if repeat == "daily":
+        return f"RRULE:FREQ=DAILY{until}"
+    if repeat == "weekly":
+        days = [DAY_ABBR[d.lower()] for d in (days_of_week or []) if d.lower() in DAY_ABBR]
+        byday = f";BYDAY={','.join(days)}" if days else ""
+        return f"RRULE:FREQ=WEEKLY{byday}{until}"
+    if repeat == "monthly":
+        return f"RRULE:FREQ=MONTHLY;BYMONTHDAY={start_date.day}{until}"
+    if repeat == "yearly":
+        return f"RRULE:FREQ=YEARLY;BYMONTH={start_date.month};BYMONTHDAY={start_date.day}{until}"
+    return None
 
 
 def add_recurring_event(
@@ -363,7 +390,8 @@ def find_events_by_title(title: str, days_ahead: int = 60) -> list:
 
 
 def modify_event(event_id: str, updates: dict, all_recurring: bool = False) -> bool:
-    """Patch an existing event. updates can have: title, start_time, end_time, start_date."""
+    """Patch an existing event. updates can have: title, start_time, end_time,
+    start_date, recurrence (list of RRULE strings; [] removes repeating)."""
     import pytz
     svc = _get_service()
     if not svc:
@@ -419,6 +447,12 @@ def modify_event(event_id: str, updates: dict, all_recurring: bool = False) -> b
 
             event["start"] = {"dateTime": start_dt.isoformat(), "timeZone": TZ}
             event["end"] = {"dateTime": end_dt.isoformat(), "timeZone": TZ}
+
+        if "recurrence" in updates:
+            if updates["recurrence"]:
+                event["recurrence"] = updates["recurrence"]
+            else:
+                event.pop("recurrence", None)
 
         svc.events().update(calendarId="primary", eventId=event_id, body=event).execute()
         return True

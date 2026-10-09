@@ -499,6 +499,10 @@ GOOGLE CALENDAR RULES:
     "start_date": "YYYY-MM-DD" or "today"/"tomorrow"/weekday name or null
     "end_date": "YYYY-MM-DD" for recurring range end or null
     "recur_days": list of weekday names e.g. ["Wednesday","Friday"] or null
+    "repeat": "daily" | "weekly" | "monthly" | "yearly" if the event repeats, else null.
+              "every month on the 13th" → repeat "monthly" with start_date = the next 13th;
+              "every year on 5 May" → "yearly"; "every Wed" → "weekly" + recur_days.
+    "end_date": for repeating events, the last date it repeats until (null = repeats with no end)
     "color": color name mentioned for the event (e.g. "green","red","blue","yellow") or null
   Examples: "add to calendar: dentist tomorrow 3pm", "add Arik class every Wed and Fri 9am-10:30am from 3 Jul to 16 Jul"
   MULTIPLE EVENTS: if the user lists more than one event to add in the same message (e.g. two
@@ -510,7 +514,10 @@ GOOGLE CALENDAR RULES:
     "time": new start time "HH:MM" or null
     "end_time": new end time "HH:MM" or null
     "start_date": new date or null
-    "value": any other description of the change
+    "new_title": new event name ONLY if the user explicitly renames it ("rename it to X", "change the title to X"), else null
+    "repeat": "daily" | "weekly" | "monthly" | "yearly" to make it repeat, "none" to stop it repeating, else null
+    "end_date": for repeat, the date it repeats until, or null
+    "value": any other description of the change (never used as the title)
 
 CALENDAR EXAMPLES:
 "connect google calendar" → {"intent":"gcal_connect"}
@@ -520,6 +527,9 @@ CALENDAR EXAMPLES:
 "add to calendar dentist tomorrow 3pm" → {"intent":"gcal_add","action":"dentist","time":"15:00","start_date":"tomorrow"}
 "add Arik scratch class every Wed and Fri 9am to 10:30am from 3 Jul to 16 Jul" → {"intent":"gcal_add","action":"Arik scratch class","time":"09:00","end_time":"10:30","start_date":"2026-07-03","end_date":"2026-07-16","recur_days":["Wednesday","Friday"]}
 "change dentist appointment to 4pm" → {"intent":"gcal_modify","action":"dentist","time":"16:00"}
+"add to calendar every month on 13th at 10am paying Arik's soccer fees" → {"intent":"gcal_add","action":"paying Arik's soccer fees","time":"10:00","start_date":"<next 13th as YYYY-MM-DD>","repeat":"monthly"}
+"make the soccer fees event repeat every month" → {"intent":"gcal_modify","action":"soccer fees","repeat":"monthly"}
+"rename dentist to Isaac dentist" → {"intent":"gcal_modify","action":"dentist","new_title":"Isaac dentist"}
 "add below into my calendar, and color set to green\n5/9/2026 Sat 4:00PM-5:00PM TIS Front Field\n6/9/2026 Sun 9:30AM-10:30AM TIS Front Field" →
 [{"intent":"gcal_add","action":"TIS Front Field","time":"16:00","end_time":"17:00","start_date":"2026-09-05","color":"green"},
  {"intent":"gcal_add","action":"TIS Front Field","time":"09:30","end_time":"10:30","start_date":"2026-09-06","color":"green"}]
@@ -687,6 +697,8 @@ Return JSON:
   "start_date": "YYYY-MM-DD" or "today"/"tomorrow"/weekday for calendar or null,
   "end_date": "YYYY-MM-DD" end of recurring range or null,
   "recur_days": list of weekday names for recurring events or null,
+  "repeat": "daily"/"weekly"/"monthly"/"yearly" for repeating calendar events ("none" to stop repeating) or null,
+  "new_title": new calendar event name for an explicit rename (gcal_modify only) or null,
   "color": color name for calendar events (e.g. "green","red","blue") or null
 }
 Return ONLY the JSON object, no markdown, no explanation — EXCEPT for the multiple-events
@@ -1746,13 +1758,14 @@ async def _gcal_add_from_intent(intent_data: dict) -> str:
     user-facing confirmation/error text. Shared by the single-event "gcal_add" intent
     and the "gcal_add_multi" intent (one call per event in the list). Caller must
     have already checked _gcal_missing_fields(intent_data) is empty."""
-    from modules.gcal import is_connected, add_event, add_recurring_event
+    from modules.gcal import is_connected, add_event, add_recurring_event, build_rrule
     import pytz as _pytz
 
     if not is_connected():
         return "Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate."
 
     title = (intent_data.get("action") or "").strip()
+    repeat = (intent_data.get("repeat") or "").strip().lower()
     time_str = (intent_data.get("time") or "").strip()
     end_time_str = (intent_data.get("end_time") or "").strip()
     start_date_str = (intent_data.get("start_date") or intent_data.get("day") or "").strip().lower()
@@ -1760,6 +1773,9 @@ async def _gcal_add_from_intent(intent_data: dict) -> str:
     recur_days = intent_data.get("recur_days") or []
     color = (intent_data.get("color") or "").strip()
     all_day = bool(intent_data.get("all_day"))
+    if recur_days and not repeat:
+        repeat = "weekly"
+    _repeat_label = {"daily": "Every day", "weekly": "Every week", "monthly": "Every month", "yearly": "Every year"}
 
     _tz = _pytz.timezone("Asia/Macau")
     now = datetime.now(_tz)
@@ -1788,16 +1804,54 @@ async def _gcal_add_from_intent(intent_data: dict) -> str:
     start_date = _parse_date(start_date_str)
 
     if all_day:
-        # Recurring all-day events aren't supported — a rare combo, and the
-        # clarification flow that sets all_day only ever fills in a single event.
-        if (await asyncio.to_thread(add_event, title, all_day_date=start_date, color=color)):
-            return f"✅ Added to calendar (all day): *{title}*\n{start_date.strftime('%a %d %b')}"
+        rrule = build_rrule(repeat, start_date, _parse_date(end_date_str.lower()) if end_date_str else None, recur_days) if repeat else None
+        if (await asyncio.to_thread(add_event, title, all_day_date=start_date, color=color,
+                                    recurrence=[rrule] if rrule else None)):
+            rep_txt = f"\n🔁 {_repeat_label.get(repeat, repeat)}" if rrule else ""
+            return f"✅ Added to calendar (all day): *{title}*\n{start_date.strftime('%a %d %b')}{rep_txt}"
         return "❌ Failed to add event. Check calendar connection."
 
     sh, sm = _parse_hm(time_str)
     eh, em = _parse_hm(end_time_str) if end_time_str else (sh + 1, sm)
 
-    # Recurring event
+    # Repeating daily / monthly / yearly, or weekly with no end date — one
+    # event with an RRULE. (Weekly with an end date keeps the older path below,
+    # which also reports the number of occurrences.) Before 2026-10-09 only
+    # weekly-with-end-date existed, so "every month on the 13th" was added once.
+    if repeat and not (repeat == "weekly" and recur_days and end_date_str):
+        until = _parse_date(end_date_str.lower()) if end_date_str else None
+        first = start_date
+        if repeat == "weekly" and recur_days:
+            wanted = [_dow_names.index(d.strip().lower()) for d in recur_days if d.strip().lower() in _dow_names]
+            while wanted and first.weekday() not in wanted:
+                first += timedelta(days=1)
+        rrule = build_rrule(repeat, first, until, recur_days)
+        if not rrule:
+            return f"❌ Unknown repeat type '{repeat}'. Use daily, weekly, monthly or yearly."
+        start_dt = _tz.localize(datetime(first.year, first.month, first.day, sh, sm, 0))
+        end_dt = _tz.localize(datetime(first.year, first.month, first.day, eh, em, 0))
+        if end_dt <= start_dt:
+            end_dt += timedelta(days=1)
+        if (await asyncio.to_thread(add_event, title, start_dt, end_dt, color=color, recurrence=[rrule])):
+            if repeat == "weekly" and recur_days:
+                how = "Every " + " & ".join(d.strip().capitalize() for d in recur_days)
+            elif repeat == "monthly":
+                _d = first.day
+                _suf = "th" if 11 <= _d <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(_d % 10, "th")
+                how = f"Every month on the {_d}{_suf}"
+            elif repeat == "yearly":
+                how = f"Every year on {first.strftime('%d %b')}"
+            else:
+                how = _repeat_label.get(repeat, repeat)
+            span = f"until {until.strftime('%d %b %Y')}" if until else "no end date"
+            return (
+                f"✅ Added repeating event: *{title}*\n"
+                f"🔁 {how}, {time_str}–{end_time_str or f'{eh:02d}:{em:02d}'}\n"
+                f"Starts {first.strftime('%a %d %b %Y')}, {span}"
+            )
+        return "❌ Failed to add repeating event. Check calendar connection."
+
+    # Weekly on given days, with an end date
     if recur_days and end_date_str:
         end_date = _parse_date(end_date_str)
         recur_days_clean = [d.strip().lower() for d in recur_days]
@@ -1874,7 +1928,9 @@ async def add_calendar_events_from_photos(bot, photos: list, caption: str) -> st
         '{"action": short event title, "start_date": "YYYY-MM-DD", "time": "HH:MM" 24h start or null, '
         '"end_time": "HH:MM" or null, "all_day": true only if the image clearly marks it all-day or gives no time at all, '
         '"end_date": "YYYY-MM-DD" end of a recurring range or null, '
-        '"recur_days": list of weekday names if it repeats weekly or null, "color": color name if the user asked or null}\n'
+        '"recur_days": list of weekday names if it repeats weekly or null, '
+        '"repeat": "daily"/"weekly"/"monthly"/"yearly" if the event repeats (from the image or the caption, '
+        'e.g. caption "every month") else null, "color": color name if the user asked or null}\n'
         "Include the location in the title if one is shown (e.g. \"Dentist @ Kiang Wu\"). "
         "If there are no events at all, return an empty events list."
     )
@@ -1889,9 +1945,10 @@ async def add_calendar_events_from_photos(bot, photos: list, caption: str) -> st
                 "action": {"type": "string"}, "start_date": _s, "time": _s, "end_time": _s,
                 "all_day": {"type": "boolean"}, "end_date": _s,
                 "recur_days": {"type": ["array", "null"], "items": {"type": "string"}},
+                "repeat": _s,
                 "color": _s,
             },
-            "required": ["action", "start_date", "time", "end_time", "all_day", "end_date", "recur_days", "color"],
+            "required": ["action", "start_date", "time", "end_time", "all_day", "end_date", "recur_days", "repeat", "color"],
             "additionalProperties": False,
         }}},
         "required": ["events"],
@@ -1964,7 +2021,11 @@ async def _gcal_modify_from_intent(intent_data: dict, context) -> dict:
     new_time = (intent_data.get("time") or "").strip()
     new_end_time = (intent_data.get("end_time") or "").strip()
     new_date_str = (intent_data.get("start_date") or "").strip().lower()
-    new_title = (intent_data.get("value") or "").strip()
+    # Only an explicit rename changes the title. This used to read "value" —
+    # the classifier's free-text "description of the change" — so "every month
+    # repeating" RENAMED the event to "every month repeating" (2026-10-09).
+    new_title = (intent_data.get("new_title") or "").strip()
+    repeat = (intent_data.get("repeat") or "").strip().lower()
 
     if new_time:
         parts = new_time.split(":")
@@ -1990,6 +2051,29 @@ async def _gcal_modify_from_intent(intent_data: dict, context) -> dict:
                 pass
     if new_title:
         updates["title"] = new_title
+    if repeat:
+        from modules.gcal import build_rrule
+        if repeat == "none":
+            updates["recurrence"] = []
+        else:
+            # Anchor monthly/yearly on the event's own date (or its new date).
+            anchor = updates.get("start_date")
+            if not anchor:
+                try:
+                    anchor = datetime.fromisoformat(events[0]["start"].replace("Z", "+00:00")).date()
+                except Exception:
+                    anchor = None
+            end_s = (intent_data.get("end_date") or "").strip()
+            until = None
+            if end_s:
+                try:
+                    until = datetime.strptime(end_s, "%Y-%m-%d").date()
+                except Exception:
+                    pass
+            rrule = build_rrule(repeat, anchor, until, intent_data.get("recur_days")) if anchor else None
+            if rrule:
+                updates["recurrence"] = [rrule]
+                updates["_repeat_label"] = repeat
 
     if not updates:
         return {"status": "missing_updates"}
@@ -2020,6 +2104,8 @@ async def _gcal_modify_from_intent(intent_data: dict, context) -> dict:
             changes.append(f"date → {updates['start_date'].strftime('%a %d %b')}")
         if "title" in updates:
             changes.append(f"title → {updates['title']}")
+        if "recurrence" in updates:
+            changes.append(f"repeat → {updates.get('_repeat_label') or 'none'}" if updates["recurrence"] else "repeat → none (one-off)")
         return {"status": "ok", "text": f"✅ Updated *{event['title']}*\n" + "\n".join(changes)}
     return {"status": "failed", "text": "❌ Failed to update event."}
 
