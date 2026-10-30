@@ -356,7 +356,7 @@ def add_recurring_event(
         return -1
 
 
-def find_events_by_title(title: str, days_ahead: int = 60) -> list:
+def find_events_by_title(title: str, days_ahead: int = 60, max_results: int = 50) -> list:
     """Search upcoming events whose title contains the given string (case-insensitive)."""
     svc = _get_service()
     if not svc:
@@ -369,7 +369,7 @@ def find_events_by_title(title: str, days_ahead: int = 60) -> list:
             timeMax=(now + timedelta(days=days_ahead)).isoformat() + "Z",
             singleEvents=True,
             orderBy="startTime",
-            maxResults=50,
+            maxResults=max_results,
         ).execute()
         matches = []
         title_lower = title.lower()
@@ -387,6 +387,22 @@ def find_events_by_title(title: str, days_ahead: int = 60) -> list:
     except Exception as e:
         logger.error(f"[GCal] find_events_by_title failed: {e}")
         return []
+
+
+def delete_event(event_id: str) -> bool:
+    """Delete one event (or one occurrence, if given an instance id; or a whole
+    series, if given the series' recurringEventId). 410 = already gone = ok."""
+    svc = _get_service()
+    if not svc:
+        return False
+    try:
+        svc.events().delete(calendarId="primary", eventId=event_id).execute()
+        return True
+    except Exception as e:
+        if getattr(getattr(e, "resp", None), "status", None) == 410:
+            return True
+        logger.error(f"[GCal] delete_event failed: {e}")
+        return False
 
 
 def modify_event(event_id: str, updates: dict, all_recurring: bool = False) -> bool:

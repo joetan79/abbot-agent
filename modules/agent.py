@@ -519,7 +519,13 @@ GOOGLE CALENDAR RULES:
     "end_date": for repeat, the date it repeats until, or null
     "value": any other description of the change (never used as the title)
 
+- "gcal_delete": user wants to remove/delete/cancel an existing calendar event (or all events with a title). Extract:
+    "action": event title to search for (required)
+  A bare "remove"/"delete" with no calendar context is NOT gcal_delete.
+
 CALENDAR EXAMPLES:
+"remove all 'Isaac code training' in my calendar" → {"intent":"gcal_delete","action":"Isaac code training"}
+"delete dentist from calendar" → {"intent":"gcal_delete","action":"dentist"}
 "connect google calendar" → {"intent":"gcal_connect"}
 "calendar code: 4/0Adeu5BxYz" → {"intent":"gcal_auth_code","value":"4/0Adeu5BxYz"}
 "what's on my calendar today" → {"intent":"gcal_today"}
@@ -675,7 +681,7 @@ QUIZ TOPIC EXAMPLES:
 
 Return JSON:
 {
-  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, gcal_modify, gcal_remind, plan_today, morning_briefing, episodic_memory, report_list, food_log, food_report, food_summary, food_log_delete, food_log_correct, food_log_status, chat],
+  "intent": one of [schedule_add, schedule_list, schedule_remove, schedule_pause, schedule_resume, schedule_summary, task_add, task_list, task_done, task_delete, memory_set, memory_get, memory_list, news, xfeed, weather, report, time_window_set, message_delete_reply, message_delete_last, message_schedule_delete_reply, message_auto_delete_request, message_delete_cancel, reminder_add, reminder_list, reminder_cancel, quiz_set_topics, goal_add, goal_done, goal_list, goal_remove, news_pref_update, gcal_connect, gcal_auth_code, gcal_today, gcal_week, gcal_add, gcal_modify, gcal_delete, gcal_remind, plan_today, morning_briefing, episodic_memory, report_list, food_log, food_report, food_summary, food_log_delete, food_log_correct, food_log_status, chat],
   "time": "HH:MM" or null,
   "frequency": "daily" or "weekly" or "once" or null,
   "day": day of week or null,
@@ -2110,6 +2116,41 @@ async def _gcal_modify_from_intent(intent_data: dict, context) -> dict:
     return {"status": "failed", "text": "❌ Failed to update event."}
 
 
+def _gcal_delete_label(e: dict) -> str:
+    try:
+        dt = datetime.fromisoformat(e["start"].replace("Z", "+00:00"))
+        label = dt.strftime("%a %d %b %H:%M") if "T" in e["start"] else dt.strftime("%a %d %b")
+    except Exception:
+        label = e["start"]
+    return f"{e['title']} — {label}" + (" 🔁" if e.get("recurringEventId") else "")
+
+
+async def _gcal_delete_from_intent(intent_data: dict, context) -> str:
+    """Finds events matching the title and asks for confirmation. Nothing is
+    deleted here — the PENDING GCAL DELETE INTERCEPT does it after a yes."""
+    from modules.gcal import is_connected, find_events_by_title
+    if not is_connected():
+        return "Google Calendar not connected or session expired. Say 'connect google calendar' to re-authenticate."
+    title = (intent_data.get("action") or "").strip()
+    if not title:
+        return "Which event do you want to delete? Please include the event name."
+    events = await asyncio.to_thread(find_events_by_title, title, 365, 250)
+    if not events:
+        return f"No upcoming events found matching '{title}' (next 12 months). Nothing deleted."
+    context.user_data["pending_gcal_delete"] = {"events": events, "ts": __import__("time").time()}
+    series = {e["recurringEventId"] for e in events if e.get("recurringEventId")}
+    lines = [f"Found {len(events)} upcoming event(s) matching '{title}':"]
+    for i, e in enumerate(events[:15], 1):
+        lines.append(f"{i}. {_gcal_delete_label(e)}")
+    if len(events) > 15:
+        lines.append(f"… and {len(events) - 15} more")
+    lines.append("")
+    lines.append("Reply *yes* to delete ALL of them" + (
+        f" (repeating events 🔁 are removed as a whole series, including past occurrences — {len(series)} series)" if series else "") + ",")
+    lines.append("a number (e.g. 2) to delete only that one occurrence, or *no* to cancel.")
+    return "\n".join(lines)
+
+
 async def _handle_gcal_modify_result(result: dict, update, context, fallback_intent_data: dict) -> None:
     """Sends the right reply for a _gcal_modify_from_intent result, and — for
     the two "missing X" statuses — remembers what we're waiting for via
@@ -2303,6 +2344,46 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
     except Exception as _le:
         logger.error(f"[Learner] Approval intercept error: {_le}")
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # ── PENDING GCAL DELETE INTERCEPT ────────────────────────────────────────
+    _pending_del = context.user_data.get("pending_gcal_delete")
+    if _pending_del:
+        context.user_data.pop("pending_gcal_delete", None)
+        _tl = original_text.strip().lower().strip(" .!。！")
+        import re as _re
+        _yes = _tl in ("yes", "y", "yes all", "all", "confirm", "ok", "是", "好", "確認", "确认", "全部", "全部删除", "全部刪除", "删除", "刪除")
+        _no = _tl in ("no", "n", "cancel", "stop", "不", "不要", "取消")
+        _nums = _re.findall(r"\d+", _tl) if (not _yes and not _no and len(_tl) <= 12) else []
+        if __import__("time").time() - _pending_del["ts"] > 600:
+            pass  # expired: fall through to normal handling
+        elif _no:
+            await update.message.reply_text("👍 Cancelled, nothing deleted.")
+            return
+        elif _yes or _nums:
+            from modules.gcal import delete_event as _delete_event
+            _evs = _pending_del["events"]
+            if _yes:
+                _ids, _seen = [], set()
+                for _e in _evs:
+                    _tid = _e.get("recurringEventId") or _e["id"]
+                    if _tid not in _seen:
+                        _seen.add(_tid)
+                        _ids.append(_tid)
+            else:
+                _ids = [_evs[int(n) - 1]["id"] for n in _nums if 0 < int(n) <= len(_evs)]
+            if not _ids:
+                await update.message.reply_text("That number isn't in the list. Nothing deleted.")
+                return
+            _ok = _fail = 0
+            for _i in _ids:
+                if await asyncio.to_thread(_delete_event, _i):
+                    _ok += 1
+                else:
+                    _fail += 1
+            await update.message.reply_text(
+                f"🗑️ Deleted {_ok} event(s)/series." + (f" ❌ {_fail} failed." if _fail else ""))
+            return
     # ─────────────────────────────────────────────────────────────────────────
 
     # ── PENDING GCAL MODIFY INTERCEPT ────────────────────────────────────────
@@ -3434,6 +3515,9 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
     elif intent == "gcal_modify":
         result = await _gcal_modify_from_intent(intent_data, context)
         await _handle_gcal_modify_result(result, update, context, intent_data)
+
+    elif intent == "gcal_delete":
+        await update.message.reply_text(await _gcal_delete_from_intent(intent_data, context), parse_mode="Markdown")
 
     elif intent == "gcal_remind":
         from modules.gcal import is_connected, get_week_events, get_today_events

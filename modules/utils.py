@@ -854,10 +854,10 @@ def ask_claude_with_history(system: str, user_msg: str,
                 messages=messages,
                 timeout=20.0,
             )
-            response_text = response_text(r)
+            reply = response_text(r)
             history_add(user_id, "user", save_text)
-            history_add(user_id, "assistant", response_text)
-            return response_text
+            history_add(user_id, "assistant", reply)
+            return reply
         except anthropic.APITimeoutError:
             logger.warning(f"History timeout attempt {attempt+1}")
             _record_api_fail("history_timeout")
