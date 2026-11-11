@@ -50,6 +50,19 @@ def get_entries_since(days: int) -> list:
     return [i for i in _load() if datetime.fromisoformat(i["ts"]) >= cutoff]
 
 
+async def _remember_digest(chat_id, text: str):
+    """Put a digest we just sent into Joe's chat history, so a follow-up that is
+    NOT a Telegram reply ("emphasise the comparing part") still knows what it
+    refers to — previously it latched onto the last meal analysis instead."""
+    try:
+        from modules.utils import history_add
+        await asyncio.to_thread(history_add, str(chat_id), "user",
+                                "[System note: ABbot just sent me the family digest below]")
+        await asyncio.to_thread(history_add, str(chat_id), "assistant", text[:1500])
+    except Exception as e:
+        logger.error(f"[Insights] remember digest failed: {e}")
+
+
 async def send_daily_digest(bot):
     """9 pm job: summarise today's family interactions and send to Joe."""
     from modules.utils import OWNER_CHAT_ID, ask_claude, MODEL_FAST
@@ -92,6 +105,7 @@ async def send_daily_digest(bot):
             text=f"👨‍👩‍👦 Family Digest ({date_str})\n\n{summary}",
         )
         logger.info("[Insights] Daily digest sent")
+        await _remember_digest(OWNER_CHAT_ID, f"👨‍👩‍👦 Family Digest ({date_str})\n\n{summary}")
 
         # Entries are NOT cleared here — send_weekly_family_digest needs the
         # full week's history to build its dated summary + suggestions, and
@@ -214,6 +228,7 @@ async def send_weekly_family_digest(bot):
         )
         return
 
+    await _remember_digest(OWNER_CHAT_ID, full_text)
     logger.info("[Insights] Weekly family digest sent")
     # Clear exactly the entries this report covered — not a blanket wipe — so
     # anything logged concurrently while the report was being generated survives.

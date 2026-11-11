@@ -2646,7 +2646,19 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
         _status_kws = ["quiz status", "quiz state", "did you send the quiz",
                        "quiz pending", "check quiz", "show quiz status", "quiz job",
                        "why no quiz answer", "quiz answer status", "what quiz"]
-        _text_lower = text.lower()
+        # Match keywords against what the user actually typed — NOT `text`, which
+        # may carry a 400-char quote of the message being replied to. A reply to
+        # the Family Digest that said "explain more" was hijacked into re-sending
+        # a months-old quiz explanation (bot.log 2026-11-11 23:05).
+        _text_lower = original_text.lower()
+        _rpl_txt = ((update.message.reply_to_message.text or update.message.reply_to_message.caption or "")
+                    if update.message.reply_to_message else "").lower()
+        _rpl_is_quiz = any(m in _rpl_txt for m in ["python quiz", "ai knowledge quiz",
+                                                   "reply with a, b, c", "❓ question", "question 1/",
+                                                   "explanations"])
+        # Replying to some other bot message (digest, meal analysis, ...): the quiz
+        # explain shortcuts below must not fire; the reply-to-quiz branch still does.
+        _rpl_other = bool(_rpl_txt) and not _rpl_is_quiz
         _wants_resend = any(kw in _text_lower for kw in _resend_kws)
         _wants_status = any(kw in _text_lower for kw in _status_kws)
         if _wants_status:
@@ -2664,10 +2676,10 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "give me the answer", "tell me the answer", "what are the answers",
             "what is the answer", "what's the answer",
         ]
-        _wants_explain_quiz = any(kw in _text_lower for kw in _explicit_explain_kws)
+        _wants_explain_quiz = (not _rpl_other) and any(kw in _text_lower for kw in _explicit_explain_kws)
 
         # "explanation" does not contain "explain" as substring — check separately
-        if not _wants_explain_quiz and "explanat" in _text_lower:
+        if not _wants_explain_quiz and not _rpl_other and "explanat" in _text_lower:
             _wants_explain_quiz = True
 
         # User replied to a quiz message → serve from disk regardless of keywords
@@ -2678,7 +2690,7 @@ async def handle_owner_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 _wants_explain_quiz = True
 
         # bare "explain" — extended window to 3 hours (was 1h, quiz can be asked about later)
-        if not _wants_explain_quiz and "explain" in _text_lower:
+        if not _wants_explain_quiz and not _rpl_other and "explain" in _text_lower:
             for _qkey in ["python_quiz", "ai_quiz"]:
                 _last = _quiz_state[_qkey].get("last_completed")
                 if _last and _last.get("completed_at"):

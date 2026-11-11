@@ -34,11 +34,38 @@ from modules.agent import (
     is_calendar_add_text, add_calendar_events_from_photos,
 )
 
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO,
-    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()],
-)
+import re as _re_log, sys as _sys_log
+from logging.handlers import RotatingFileHandler
+
+
+class _RedactTokens(logging.Filter):
+    """Never let a Telegram bot token reach a log file (httpx logs full URLs)."""
+    _pat = _re_log.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}")
+
+    def filter(self, record):
+        try:
+            msg = record.getMessage()
+            if ":" in msg and self._pat.search(msg):
+                record.msg = self._pat.sub("<token>", msg)
+                record.args = ()
+        except Exception:
+            pass
+        return True
+
+
+# One file handler (rotating, 10 MB x 5) + stdout for the screen session. The
+# start command must NOT tee into bot.log any more — that was what wrote every
+# line twice and let the file grow to 450 MB.
+_fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+_fh = RotatingFileHandler("bot.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+_sh = logging.StreamHandler(_sys_log.stdout)
+for _h in (_fh, _sh):
+    _h.setFormatter(_fmt)
+    _h.addFilter(_RedactTokens())
+logging.basicConfig(level=logging.INFO, handlers=[_fh, _sh])
+# httpx logs every getUpdates poll (~8,000 lines/day) at INFO — keep warnings only.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
