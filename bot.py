@@ -273,6 +273,13 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_owner(sender_id):
             # Water log: "w250" / "w250 咖啡" / "w-250" (correction). Handled
             # directly — never sent to the intent classifier.
+            _w_pending = water_tracker.handle_pending(text)
+            if _w_pending:
+                await msg.reply_text(_w_pending)
+                return
+            if water_tracker.is_query(text):
+                await msg.reply_text(water_tracker.build_today_report())
+                return
             water_cmd = water_tracker.parse_command(text)
             if water_cmd:
                 await msg.reply_text(water_tracker.log_water(*water_cmd))

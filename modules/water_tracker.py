@@ -27,6 +27,12 @@ WATER_FILE = Path("data/water_log.json")
 TZ = pytz.timezone("Asia/Macau")
 KEEP_DAYS = 3
 MAX_ML = 3000  # sanity cap for a single entry (catches typos like w25000)
+DAY_CONFIRM_ML = 3000  # a log that pushes today's total above this needs Joe's OK
+PENDING_TTL = 600  # seconds the confirmation stays valid
+
+_pending = None  # (ml, note, expires_at) awaiting confirmation
+_YES = {"y", "yes", "ok", "是", "確認", "确认", "確定", "确定", "好", "係", "对", "對"}
+_QUERY_RE = re.compile(r"^\s*[wW]\s*[?？]\s*$")
 
 # w250 / W 250 / w250ml / w250 咖啡 / w-250
 _CMD_RE = re.compile(r"^\s*[wW]\s*(-?)\s*(\d{1,5})\s*(?:ml|ML|毫升)?(?:\s+(.*))?\s*$")
@@ -81,11 +87,50 @@ def _total(day_entries: list) -> int:
     return sum(e["ml"] for e in day_entries)
 
 
-def log_water(ml: int, note: str = "") -> str:
-    """Records an entry (negative ml = correction) and returns the reply text."""
+def is_query(text: str) -> bool:
+    """"w?" — ask for today's current record."""
+    return bool(_QUERY_RE.match(text or ""))
+
+
+def build_today_report() -> str:
+    """On-demand: today's entries so far (whole day, not cut at 18:00)."""
+    entries = _prune(_load())
+    today = _now().date()
+    day = _day_entries(entries, today)
+    head = f"💧 今日喝水記錄 Today's water（{today.strftime('%m/%d')}，截至 {_now().strftime('%H:%M')}）"
+    if not day:
+        return f"{head}\n\n今天到現在還沒有記錄。\nNothing logged yet today."
+    return "\n".join([head, "", *_format_day(day), "", f"合共 Total: {_total(day)}ml"])
+
+
+def handle_pending(text: str):
+    """Call on every owner text first. If a >3000ml log is awaiting OK and the
+    text confirms it, records it and returns the reply. Any other text drops
+    the pending log (returns None so the message is processed normally)."""
+    global _pending
+    if not _pending:
+        return None
+    ml, note, exp = _pending
+    _pending = None
+    if _now().timestamp() > exp:
+        return None
+    if (text or "").strip().lower() in _YES:
+        return log_water(ml, note, confirmed=True)
+    return None
+
+
+def log_water(ml: int, note: str = "", confirmed: bool = False) -> str:
+    """Records an entry (negative ml = correction) and returns the reply text.
+    A log that would take today's total above DAY_CONFIRM_ML is held until Joe
+    confirms (reply "y")."""
+    global _pending
     entries = _prune(_load())
     today = _now().date()
     current = _total(_day_entries(entries, today))
+    if ml > 0 and current + ml > DAY_CONFIRM_ML and not confirmed:
+        _pending = (ml, note, _now().timestamp() + PENDING_TTL)
+        return (f"⚠️ 記錄後今天會合共 {current + ml}ml（超過 {DAY_CONFIRM_ML}ml）。確認要記錄 {ml}ml 嗎？回覆 y 確認，其他任何訊息取消。\n"
+                f"This would bring today to {current + ml}ml (over {DAY_CONFIRM_ML}ml). Record {ml}ml? Reply y to confirm; anything else cancels.")
     if ml < 0 and current + ml < 0:
         return (f"⚠️ 今天只記錄了 {current}ml，不能扣除 {-ml}ml。\n"
                 f"Today's total is only {current}ml — can't subtract {-ml}ml.")
